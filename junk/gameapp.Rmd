@@ -1,0 +1,2777 @@
+---
+title: "gemaapp"
+author: "Suschevskiy Vsevolod"
+date: "1/26/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Hi Seva,
+
+See attached the data.
+
+<!-- You can find the full list of students who participated in the survey in the data GameApp_SurveyRAW_Oct2020. We need to remove students who did not give consent. -->
+
+<!-- We can get the list of students who used the game app and who did not use the game app based on this list. -->
+
+We should only use two data file:
+
+For the survey data: GameApp_SurveyRAW_Oct2020
+For the gameapp usage: GameAppActivity
+
+<!-- We can filter out the students who responded with a  2 in Q1 (1 means consent and 2 means non-consent) -->
+
+My notes:
+- look at activity data.
+<!-- - What we agreed on is to look at the gameapp activity..filter the number of students who used the app from those who did not..the reference to this is the users from the survey (check above). -->
+<!-- - play a bit with the data..show how much time each user spent on the questions. -->
+<!-- - see how many days they used the app..and for how long? calculate from the timestamps. -->
+<!-- - see if u can find something interesting? -->
+
+- game mode usage 
+- game modes (battel|compete) vs (practice|test)
+- cluster analysis -- extract stratefies and compare them with outcomes
+- questions about final grade
+- exam dates
+- 
+
+
+If there are serious questions, email Jacqueline and put me in cc.
+
+Let's surprise those guys in the Netherlands with some good work!
+
+Best,
+
+```{r}
+library(tidyverse)
+library(vroom)
+library(lubridate)
+# devtools::install_github("data-edu/tidyLPA")
+# install.packages("MplusAutomation")
+library(tidyLPA)
+library(cli)
+
+library(gt)
+library(gtsummary)
+library(ggpubr)
+
+library(lavaan)
+library(corrplot)
+library(polycor)
+library(sjmisc)
+library(semPlot)
+
+library(mgcv)
+```
+
+```{r}
+activity <- vroom::vroom('GameAppActivity.csv')
+survey <- vroom::vroom('GameApp_SurveyRAW_Oct2020.csv')
+# exam <- vroom::v('GameAppExam.xlsx')
+GameAppExam <- readxl::read_excel("~/SLATE/game_app/GameAppExam.xlsx")
+
+survey = survey %>% 
+  filter(Q1 != 2)
+```
+
+```{r}
+survey = survey %>% 
+  mutate(id = Q2 %>% str_extract("[:digit:].+[:digit:]"))
+
+activity = activity %>% 
+  mutate(id = username %>% str_extract_all("[:digit:].+[:digit:]"))
+```
+
+
+#### counts
+
+```{r}
+survey %>% 
+  filter(Q1 != 2) %>% 
+  count(id)
+
+
+
+activity %>% 
+  count(id)
+```
+
+
+```{r}
+activity = activity %>% 
+  mutate(srv = case_when(
+    id %in% survey$id ~ TRUE,
+    TRUE ~ FALSE
+  ))
+
+activity %>% 
+  count(id)
+```
+
+```{r}
+activity = activity %>% 
+  select(-time_to_answer) %>% 
+  unique() %>% 
+  mutate(timestamp = ymd_hms(timestamp)) %>% 
+  arrange(timestamp, username) %>% 
+  group_by(username) %>% 
+  mutate(time_dif = timestamp - lag(timestamp),
+         time_diff_sec = as.numeric(time_dif, units = 'secs'))
+```
+
+```{r}
+activity$time_diff_sec  %>%  summary()
+
+activity %>% 
+  filter(time_diff_sec >= 0 & time_diff_sec < 120) %>% 
+  ggplot(aes(x = time_diff_sec, fill = as.factor(correct)))+
+  geom_histogram(binwidth = 1, alpha = 0.9)+
+  theme_minimal()
+```
+
+```{r}
+activity %>% 
+  # filter(time_diff_sec >= 0 & time_diff_sec < 120) %>% 
+  group_by(username, correct) %>% 
+  summarise(n = n()) %>% 
+  ggplot(aes(x = as.factor(correct), y = n))+
+  geom_violin()+
+  theme_minimal()
+```
+
+```{r}
+library(gganimate)
+
+top_users = activity %>% 
+  ungroup() %>% 
+  count(username) %>% 
+  arrange(n)
+  slice_max(n, n = 20) %>% .$username
+
+
+activity %>% 
+  filter(username %in% top_users) %>% 
+  mutate(score = case_when(
+    correct == 1 ~ 1,
+    TRUE ~ -1
+  )) %>% 
+  group_by(id) %>%
+  arrange(timestamp) %>% 
+  mutate(n = row_number(),
+cum_score = cumsum(score),
+id = as.factor(id)
+         ) %>% 
+  filter(n < 120) %>% 
+  ggplot(aes(x = n, y = cum_score, color = id))+
+  geom_line() +
+  scale_color_viridis_d() +
+  labs(x = "Exercises", y = "Scores") +
+  theme_minimal()+
+  theme(legend.position = "top")-> p
+  
+
+
+p +
+  geom_point() +
+  transition_reveal(n)
+```
+
+```{r}
+names(survey)
+```
+
+
+```{r}
+survey$`Q7_5...17`
+```
+
+```{r}
+GameAppExam$`MC-SCORE (max 60)` %>% 
+  plot()
+
+
+GameAppExam[,2:3] %>% 
+  plot()
+```
+
+## Measurments
+
+### Advanced planning 
+
+```{r}
+gl <- function(x) {
+  y <- c(unclass(diff(x)))  # c and unclass -- preparing it for rle
+  r <- rle(y)
+  z <- with(r, max(lengths[values==1]))
+  if (z < 0) {
+    z = 0
+  }
+  return(z)
+}
+
+?rle
+
+activity_adv <- activity %>% 
+  ungroup() %>% 
+  mutate(day = floor_date(timestamp, 'days') ) %>% 
+  select(id, day) %>% 
+  unique() %>% 
+  group_by(id) %>% 
+  summarise(
+    max.consecutive = gl(day) + 1,
+    max.n =  n(),
+    min.far = difftime(ymd('2018-03-09'), min(day)) %>% as.numeric(),
+    max.far = difftime(ymd('2018-03-09'), max(day)) %>% as.numeric()
+  )
+
+
+activity_adv %>% 
+  ggplot(aes(x = max.consecutive))+
+  geom_boxplot()
+```
+
+### timediff
+
+```{r}
+activity_time <- activity %>% 
+  filter(time_diff_sec >= 0 & time_diff_sec < 120) %>% 
+  group_by(id) %>% 
+  summarise(m.time = median(time_diff_sec), min.time = min(time_diff_sec), max.time = max(time_diff_sec))
+
+activity_time %>% 
+  ggplot()+
+  geom_boxplot(aes(x = m.time))
+```
+
+### game profiles
+
+```{r}
+activity_modes <- activity %>% 
+  ungroup() %>% 
+  mutate(game_mode_id =
+           recode(
+             game_mode_id,
+             '1' = 'mode_practice',
+             '2' = "mode_test",
+             '3' = "mode_compete",
+             '4' = "mode_battle"
+           )) %>% 
+  group_by(id, game_mode_id) %>% 
+  summarise(n = n()) %>% 
+  mutate(freq = n / sum(n)) %>% 
+  select(-n) %>% 
+  pivot_wider(names_from = game_mode_id, values_from = freq) %>% 
+  mutate_all(~replace_na(., 0))
+
+activity_modes_2 <- activity %>% 
+  ungroup() %>% 
+  mutate(game_mode_id =
+           recode(
+             game_mode_id,
+             '1' = 'mode_practice',
+             '2' = "mode_test",
+             '3' = "mode_compete",
+             '4' = "mode_battle"
+           )) %>% 
+  group_by(id, game_mode_id) %>% 
+  summarise(n = n()) %>% 
+  pivot_wider(names_from = game_mode_id, values_from = n) %>% 
+  mutate_all(~replace_na(., 0))
+  
+activity_modes %>%
+  pivot_longer(starts_with("mode"), names_to = "mode", values_to = "freq") %>% 
+  ggplot() +
+  geom_boxplot(aes(y = freq, x = mode))
+```
+
+### scores
+
+```{r}
+activity_scores = activity %>% 
+  ungroup() %>% 
+    mutate(correct =
+           recode(
+             correct,
+             '1' = 'correct',
+             '0' = "wrong"
+           )) %>% 
+  group_by(id, correct) %>% 
+  summarise(n = n()) %>% 
+  mutate(freq_correct = n / sum(n)) %>% 
+  filter(correct == "correct") %>% 
+  select(id, freq_correct)
+```
+### attempts
+
+```{r}
+activity_count = activity %>% 
+  ungroup() %>% 
+  group_by(id) %>% 
+  count() %>% 
+  rename('attempts' = 'n')
+```
+
+
+## lATENT profile
+
+```{r}
+GameAppExam%>% 
+  rename(id = username, 
+         mc = `MC-SCORE (max 60)`,
+         open = `Open-ended questions (max 40)`) %>%
+  unique() %>% 
+  mutate_all(~as.numeric(.))-> GameAppExam
+
+activity_adv %>% 
+  left_join(activity_modes) %>% 
+  left_join(activity_scores) %>% 
+  left_join(activity_time) %>% 
+  left_join(activity_count) %>% 
+  unnest(id) %>% 
+  left_join(GameAppExam %>% mutate(id = as.character(id))) %>% 
+  left_join(activity_modes_freq %>% select(id, freq)) %>% 
+  janitor::clean_names()-> df_comb
+```
+
+```{r}
+df_comb$max_far %>% sd()
+```
+
+```{r}
+# poms
+#6
+set.seed(26)
+
+df_comb %>%
+  column_to_rownames('id') %>% 
+  select(-starts_with("mode")) %>%
+  select(-freq) %>%
+  select(-mc, -open) %>%
+  single_imputation() %>%
+  tidyLPA::poms() %>% 
+  estimate_profiles(
+    1:7,
+    variances = c("equal", "varying", 'equal', 'varying'),
+    covariances = c("zero", "zero", 'equal',  'varying')
+  ) %>%
+  compare_solutions(statistics = c("AIC", "BIC", "AWE", "CLC","KIC"))
+
+# 'varying', 'equal'
+# 'equal', 'varying',
+# ?compare_solutions
+```
+
+
+
+```{r}
+ df_comb %>%
+  column_to_rownames('id') %>% 
+  select(-starts_with("mode")) %>%
+  select(-freq) %>% 
+  select(-mc, -open) %>%
+  single_imputation() %>%
+  # na.omit() %>%
+  # scale() %>%
+  rename(
+    days_in_row = max_consecutive,
+    use_days = max_n,
+    start_early = min_far,
+    finish_late = max_far,
+    correct = freq_correct,
+    mean_time = m_time,
+    min_time = min_time,
+    max_time = max_time
+    # non_game_mode = freq
+  ) %>% 
+  # scale() %>% 
+  poms() %>%
+  estimate_profiles(3,
+                    variances = "varying",
+                    covariances = "zero") -> profiles
+
+?poms
+profiles %>% 
+  plot_profiles(add_line =F, rawdata = T)
+
+?plot_profiles
+```
+
+```{r}
+profile_fit = get_fit(profiles)
+gt::gt(profile_fit)
+```
+
+### DrAW LPA
+
+```{r}
+names(df_comb_lp)
+
+df_comb_lp %>%
+  select(-starts_with("mode"), -mc, -open) %>%
+    mutate(Class = fct_recode(Class, "Disengaged learners" = "1", "Active learners" = "2", "Utilitarian learners"="3")) %>% 
+  select(-id) %>% 
+    rename(
+    'Days in a row' = max_consecutive,
+    "Unique days" = max_n,
+    "Early start" = min_far,
+    "Late finish" = max_far,
+    "Correct answers" = freq_correct,
+    "Mean time" = m_time,
+    "Minimum time" = min_time,
+    "Maximum time" = max_time,
+    "Frequency of mode" = freq,
+    "Attempts"=attempts,
+    "Exam grade" = sum
+  ) %>% 
+  select(-"Exam grade") %>% 
+  single_imputation() %>% 
+  poms()-> df_comb_lp_plot
+
+df_comb_lp_plot %>% 
+  pivot_longer(cols = c('Days in a row', "Unique days", "Early start", "Late finish", "Correct answers" ,"Mean time", "Minimum time", "Maximum time", "Frequency of mode", "Attempts"), names_to = "measures", values_to = "poms") ->df_comb_lp_plot
+
+
+df_comb_lp_plot %>% 
+  ggplot(aes(x = poms, y = measures, color = Class))+
+  geom_jitter(alpha = 0.3, width = 0.1, height = 0.3)+
+  geom_boxplot(alpha = 0.5, outlier.shape = NA, coef = 0)+
+  theme_bw()+
+  ggtitle("Latent Profiles of Engagement" )+
+  # theme(legend.position = "none") +
+  theme(text=element_text(size=12,  family="Helvetica"))+
+  scale_color_brewer(palette = "Set2")+
+  ylab("")+
+  coord_flip()+
+  scale_y_discrete(guide = guide_axis(n.dodge=2))+
+  theme(legend.position = c(0.9, 0.8))+
+  xlim(c(0, 1))
+
+ggsave(filename = "LPA_GGPLOT2.png", width = 10, height = 5)
+
+?geom_jitter
+```
+
+
+
+```{r}
+df_comb %>%
+  # select(-starts_with("mode")) %>%
+  # select(-mc, -open) %>%
+  single_imputation() %>%
+  # na.omit() %>%
+  mutate(Class = as.factor(get_data(profiles)$Class)) %>%
+  # select(Class ,id) %>%
+  # left_join(df_comb) %>%
+  # na.omit() %>%
+  ungroup()->df_comb_lp
+
+df_comb_lp %>% 
+  count(Class)
+
+# get_data(profiles) -> df_comb_lp
+```
+
+```{r}
+df_comb_lp %>%
+  select(-starts_with("mode"), -mc, -open) %>%
+    mutate(Class = fct_recode(Class, "Disengaged learners" = "1", "Active learners" = "2", "Utilitarian learners"="3")) %>% 
+  group_by(Class) %>% 
+  summarise_all(~mean(.) %>% round(3)) %>%  #median
+  select(-id) %>% 
+    rename(
+    'Days in a row' = max_consecutive,
+    "Unique days" = max_n,
+    "Early start" = min_far,
+    "Late finish" = max_far,
+    "Correct answers" = freq_correct,
+    "Mean time" = m_time,
+    "Minimum time" = min_time,
+    "Maximum time" = max_time,
+    "Frequency of mode" = freq,
+    "Attempts"=attempts,
+    "Exam grade" = sum
+  ) %>% 
+  gt::gt() %>% 
+    tab_header(
+    title = "Median measures by class"
+  ) %>% 
+  tab_footnote(
+    footnote = "Were not used in estimation of profiles.",
+    locations = cells_column_labels(
+      columns = c("Frequency of mode", "Exam grade")
+    )
+  ) %>% 
+  gtsave(filename = "class_time.html")
+
+?gtsave
+?tab_footnote
+?gt
+```
+
+1. Disengagement -- started early, finished early , made more mistakes and have not used for a while
+2. Active users 
+3. Exam preparation 
+
+
+```{r}
+df_comb_lp %>% 
+ggplot(aes(x = max_n, color = Class))+
+  geom_density()
+```
+
+
+```{r}
+# ?kruskal.test
+kruskal.test(mc ~ Class ,data = df_comb_lp)
+kruskal.test(open ~ Class ,data = df_comb_lp)
+
+
+# aov(mc ~ Class ,data = df_comb_lp) %>% summary()
+# aov(open ~ Class ,data = df_comb_lp) %>% summary()
+
+df_comb_lp$sum = df_comb_lp$mc+ df_comb_lp$open
+aov(sum ~ Class ,data = df_comb_lp) %>% summary()
+kruskal.test(sum ~ Class ,data = df_comb_lp)
+
+
+# ?t.test
+t.test(mc ~ Class ,data = df_comb_lp)
+t.test(open ~ Class ,data = df_comb_lp)
+```
+
+```{r}
+df_comb_lp %>% 
+ggplot(aes(x = Class, y = mc))+
+  geom_violin(aes(fill = Class), trim = FALSE) + 
+  geom_boxplot(width = 0.2)+
+    scale_fill_brewer(palette = "RdBu")+
+  theme(legend.position = "none")+
+  theme_bw()+
+  ggtitle("Test scores")
+
+df_comb_lp %>% 
+ggplot(aes(x = Class, y = open))+
+  geom_violin(aes(fill = Class), trim = FALSE) + 
+  geom_boxplot(width = 0.2)+
+    scale_fill_brewer(palette = "RdBu")+
+  theme(legend.position = "none")+
+  theme_bw()+
+  ggtitle("Open question scores")
+```
+
+```{r}
+df_comb_lp %>%
+  mutate(grade = open + mc) %>%
+  ggplot(aes(x = Class , y = grade)) +
+  geom_violin(aes(color = Class), trim = F) +
+  geom_jitter(aes(color = Class), alpha = 0.5) +
+  stat_summary(
+    fun.data = "mean_sdl",
+    fun.args = list(mult = 1),
+    geom = "pointrange",
+    color = "black"
+  ) +
+  # scale_fill_manual(values = c("#00AFBB", "#E7B800"))+
+  # scale_fill_brewer(palette = "RdBu") +
+  scale_color_brewer(palette = "RdBu") +
+  theme(legend.position = "none") +
+  theme_bw() +
+  ggtitle("grade")
+```
+
+```{r}
+??tbl_summary
+df_comb_lp %>%
+  select(Class, starts_with("freq") ,mc, open) %>% 
+  m
+  tbl_summary(by = Class) %>% add_n() %>% add_p()
+```
+
+
+
+## Game modes
+
+```{r}
+df_comb %>% 
+  ggplot(aes(x = mode_battle ,y = open))+
+  geom_point()
+
+activity_modes_2 %>%
+  mutate(game_no = mode_practice + mode_test,
+         game = mode_compete + mode_battle) %>%
+  select(id, game_no , game) %>%
+  unnest(id) %>%
+  left_join(GameAppExam %>% mutate(id = as.character(id))) %>%
+  janitor::clean_names() %>% 
+  mutate(freq = game_no/(game + game_no) ) -> activity_modes_freq
+
+activity_modes_freq %>% 
+  ggplot(aes(x = game_no ,y = mc))+
+  geom_point()+
+  scale_x_log10()
+```
+
+```{r}
+library(tidymodels)
+
+
+set.seed(4595)
+data_split <- initial_split(activity_modes_freq %>% na.omit(), strata = "mc", prop = 0.75)
+
+act_train <- training(data_split)
+act_test  <- testing(data_split)
+
+
+```
+
+```{r}
+norm_recipe <- 
+  recipe(
+    mc ~ game + game_no, 
+    data = act_train
+  ) %>%
+  # step_center(all_predictors()) %>%
+  # step_scale(all_predictors()) %>%
+  # step_log(all_predictors(), base = 10) %>%
+  # estimate the means and standard deviations
+  prep(training = act_train, retain = TRUE)
+
+# Now let's fit the model using the processed version of the data
+
+glmn_fit <- 
+  linear_reg(penalty = 0.001, mixture = 0.5) %>% 
+  set_engine("glmnet") %>%
+  fit(mc ~ ., data = bake(norm_recipe, new_data = NULL))
+glmn_fit
+summary(glmn_fit)
+```
+
+```{r}
+
+# First, get the processed version of the test set predictors:
+test_normalized <- bake(norm_recipe, new_data = act_test, all_predictors())
+
+test_results <- 
+  act_test %>%
+  select(mc) %>%
+  bind_cols(predict(glmn_fit, new_data = test_normalized) %>%
+              rename(glmnet = .pred)) %>% 
+  ungroup() %>% 
+  select(-id)
+test_results
+#> # A tibble: 731 x 3
+#>    Sale_Price `random forest` glmnet
+#>         <dbl>           <dbl>  <dbl>
+#>  1       5.33            5.22   5.27
+#>  2       5.02            5.21   5.17
+#>  3       5.27            5.25   5.23
+#>  4       5.60            5.51   5.25
+#>  5       5.28            5.24   5.25
+#>  6       5.17            5.19   5.19
+#>  7       5.02            4.97   5.19
+#>  8       5.46            5.50   5.49
+#>  9       5.44            5.46   5.48
+#> 10       5.33            5.50   5.47
+#> # … with 721 more rows
+
+test_results %>% metrics(truth = mc, estimate = glmnet) 
+
+
+test_results %>% 
+  gather(model, prediction, -mc) %>% 
+  ggplot(aes(x = prediction, y = mc)) + 
+  geom_abline(col = "green", lty = 2) + 
+  geom_point(alpha = .4)
+```
+
+```{r}
+df_comb_lp
+
+m1 = lm(    mc ~ .-id-open, data = df_comb_lp)
+summary(m1)
+plot(m1)
+```
+
+## HDBSCAN
+
+```{r}
+df_comb %>%
+  column_to_rownames('id') %>% 
+  select(-starts_with("mode")) %>%
+  select(-mc, -open) %>%
+  single_imputation() %>%
+  # na.omit() %>%
+  # scale() %>%
+  rename(
+    consistency = max_consecutive,
+    use_days = max_n,
+    advanced_planning = max_far,
+    correct = freq_correct,
+    mean_time = m_time,
+    min_time = min_time,
+    max_time = max_time,
+    non_game_mode = freq
+  ) %>% 
+  poms() -> df_comb_clean
+
+?poms
+```
+
+
+```{r}
+dbscan::kNNdistplot(df_comb_clean, k =  6)
+abline(h = 0.44, lty = 2)
+```
+
+
+```{r}
+library("dbscan")
+
+# df_comb_clean
+
+# ?hdbscan
+
+cl <- hdbscan(df_comb_clean, minPts = 5)
+cl
+?dbscan
+res.db <- dbscan::dbscan(df_comb_clean, 0.278, 4)
+res.db
+```
+
+```{r}
+plot(cl$hc, main="HDBSCAN* Hierarchy")
+```
+
+
+```{r}
+check <- rep(F, nrow(df_comb_clean)-1)
+core_dist <- kNNdist(df_comb_clean, k=5-1)
+
+## cutree doesn't distinguish noise as 0, so we make a new method to do it manually 
+cut_tree <- function(hcl, eps, core_dist){
+  cuts <- unname(cutree(hcl, h=eps))
+  cuts[which(core_dist > eps)] <- 0 # Use core distance to distinguish noise
+  cuts
+}
+
+eps_values <- sort(cl$hc$height, decreasing = T)+.Machine$double.eps ## Machine eps for consistency between cuts 
+for (i in 1:length(eps_values)) { 
+  cut_cl <- cut_tree(cl$hc, eps_values[i], core_dist)
+  dbscan_cl <- dbscan(df_comb_clean, eps = eps_values[i], minPts = 5, borderPoints = F) # DBSCAN* doesn't include border points
+
+  ## Use run length encoding as an ID-independent way to check ordering
+  check[i] <- (all.equal(rle(cut_cl)$lengths, rle(dbscan_cl$cluster)$lengths) == "TRUE")
+}
+print(all(check == T))
+```
+
+```{r}
+plot(cl ,show_flat = T)
+```
+
+```{r}
+plot(df_comb_clean, col=cl$cluster+1, pch=21)
+  colors <- mapply(function(col, i) adjustcolor(col, alpha.f = cl$membership_prob[i]), 
+                   palette()[cl$cluster+1], seq_along(cl$cluster))
+
+points(df_comb_clean, col=colors, pch=20)
+```
+
+```{r}
+print(cl$cluster_scores)
+  head(cl$membership_prob)
+```
+
+```{r}
+install.packages("uwot")
+library(uwot)
+
+df_umap <- umap(df_comb_clean)
+
+plot(df_umap)
+```
+
+```{r}
+df_umap %>% 
+  as_tibble() %>% 
+ggplot(aes(x = V1 ,y = V2))+
+  geom_point(color = as.factor(cl$cluster +1))+
+  ggtitle("hdbscan")
+```
+
+```{r}
+df_umap %>% 
+  as_tibble() %>% 
+ggplot(aes(x = V1 ,y = V2))+
+  geom_point(color = as.factor(res.db$cluster +1))+
+  ggtitle("Ddbscan")
+
+```
+
+
+```{r}
+df_umap %>% 
+  as_tibble() %>% 
+ggplot(aes(x = V1 ,y = V2))+
+  geom_point(color = as.factor(df_comb_lp$Class))+
+  ggtitle("Latent profiles")
+```
+
+### Survey 2 
+
+```{r}
+library(foreign)
+
+survey2 <- read.spss("~/SLATE/game_app/GameAppSurvey2_TranslatedClean7Dec.sav", to.data.frame=TRUE)
+
+library(haven)
+
+survey2 = read_sav("~/SLATE/game_app/GameAppSurvey2_TranslatedClean7Dec.sav")
+survey2 %>% 
+  rename(id = ERNA)
+```
+
+
+
+
+### Chiq
+
+```{r}
+df_comb_lp %>% 
+  pivot_longer(starts_with("mode"), names_to = "mode", values_to = "mode_share") %>% 
+  group_by(id) %>% 
+  filter(mode_share == max(mode_share)) %>% 
+  ungroup() -> df_chi
+
+library(infer)
+
+df_chi %>% 
+  specify(mode ~ Class) %>%
+  # hypothesize(null = "independence") %>%
+  # generate(reps = 1000, type = "permute") %>%
+  calculate(stat = "Chisq") -> observed_indep_statistic
+observed_indep_statistic
+```
+
+```{r}
+null_distribution_simulated <- df_chi %>% 
+  specify(mode ~ Class) %>%
+  hypothesize(null = "independence") %>%
+  generate(reps = 1000, type = "permute") %>%
+  calculate(stat = "Chisq")
+
+null_distribution_theoretical <- df_chi %>%
+  specify(mode ~ Class) %>%
+  hypothesize(null = "independence") %>%
+  # note that we skip the generation step here!
+  calculate(stat = "Chisq")
+```
+
+
+```{r}
+null_distribution_simulated %>%
+  visualize() + 
+  shade_p_value(observed_indep_statistic,
+                direction = "greater")
+```
+
+```{r}
+# visualize both null distributions and the test statistic!
+null_distribution_simulated %>%
+  visualize(method = "both") + 
+  shade_p_value(observed_indep_statistic,
+                direction = "greater")
+```
+
+```{r}
+p_value_independence <- null_distribution_simulated %>%
+  get_p_value(obs_stat = observed_indep_statistic,
+              direction = "greater")
+
+p_value_independence
+```
+
+```{r}
+chisq_test(df_chi, mode ~ Class)
+```
+
+```{r}
+library("vcd")
+df_chi %>%
+  count(mode, Class) %>%
+  pivot_wider(
+    names_from = Class,
+    names_prefix = "class_",
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  column_to_rownames('mode') %>% 
+  as.matrix() %>% 
+  as.table() -> table_chi
+
+# plot just a subset of the table
+assoc(table_chi, shade = TRUE, las=3)
+```
+
+```{r}
+library(tidystats)
+fisher.test(mode ~ Class, data = df_chi)
+?fisher.test
+
+tab <- janitor::tabyl(df_chi, Class, mode)
+tab
+
+stats::fisher.test(table_chi ,workspace = 2e8, hybrid = T, simulate.p.value = T)
+```
+<!-- ## expected grade -->
+
+<!-- ```{r} -->
+<!-- GameApp_SurveyRAW_Oct2020 <- read_csv("~/SLATE/game_app/GameApp_SurveyRAW_Oct2020.csv") -->
+
+<!-- GameApp_SurveyRAW_Oct2020 -->
+<!-- ``` -->
+
+## survey profiles
+
+
+```{r}
+survey1clean %>% 
+  select(ends_with("Mean"), username) -> survey_lpa
+survey_lpa
+```
+
+```{r}
+survey_lpa %>%
+  as_tibble() %>% 
+  column_to_rownames('username') %>%
+  single_imputation() %>%
+  tidyLPA::poms() %>% 
+  estimate_profiles(
+    1:8,
+    variances = c("equal", "varying", 'equal', 'varying'),
+    covariances = c("zero", "zero", 'equal',  'varying')
+  ) %>%
+  compare_solutions(statistics = c("AIC", "BIC", "AWE", "CLC","KIC"))
+```
+
+
+```{r}
+survey_lpa %>%
+  as_tibble() %>% 
+  column_to_rownames('username') %>%
+  single_imputation() %>%
+  # scale() %>% 
+  tidyLPA::poms() %>%
+  estimate_profiles(
+    3,
+    variances = c('varying'),
+    covariances = c('varying')
+  ) -> profiles_2
+
+profiles_2
+
+profiles_2 %>% 
+  plot_profiles(add_line =F, rawdata = T)
+```
+
+## Pvalue plot
+
+```{r}
+?compare_means
+library(ggpubr)
+test = compare_means(sum ~ Class, p.adjust.method = "holm",  data = df_comb_lp %>% 
+                       filter(!id %in% c("485167", "482613" ,"73834")))
+test
+```
+
+
+```{r}
+
+my_comparisons <- list( c("1", "2"), c("1", "3"), c("2", "3") )
+
+ggboxplot(df_comb_lp, x = "Class", y = "sum",
+          palette = "jco")+ 
+  stat_compare_means(comparisons = my_comparisons)+ # Add pairwise comparisons p-value
+  stat_compare_means(label.y = 120)#+     # Add global p-value+
+  # stat_pvalue_manual(test, label = "p.adj.signif", tip.length = 0.01)
+```
+
+```{r}
+my_comparisons <- list( c("Disengaged learners", "Active learners"), c("Disengaged learners", "Utilitarian learners"), c("Active learners", "Utilitarian learners") )
+
+g_grade = df_comb_lp %>% 
+  mutate(Class = fct_recode(Class, "Disengaged learners" = "1", "Active learners" = "2", "Utilitarian learners"="3")) %>% 
+  filter(!id %in% c("485167", "482613" ,"73834")) %>% 
+  ggplot(aes(x = Class, y = sum)) +
+  geom_violin( trim = T) +
+  geom_jitter(alpha = 0.3) +
+  stat_compare_means(comparisons = my_comparisons) + # Add pairwise comparisons p-value
+  stat_compare_means(label.y = 120)+#+     # Add global p-value+
+  # stat_pvalue_manual(test, label = "p.signif", tip.length = 0.01)
+    stat_summary(
+    fun.data = "mean_sdl",
+    fun.args = list(mult = 1),
+    geom = "pointrange",
+    color = "black"
+  ) +
+    theme(legend.position = "none") +
+  theme_bw() +
+  theme(text=element_text(size=16,  family="Helvetica"))+
+  scale_color_brewer(palette = "RdBu") +
+  ggtitle("Exam grade by class")+
+  ylab("Exam scores")
+
+g_grade
+
+ggsave(filename = "grade_class.png", width = 8, height = 5)
+```
+
+
+## dunn test
+
+```{r}
+library(rstatix)
+# ??dunn_test
+df_comb_lp %>% dunn_test(sum ~ Class)
+```
+
+## Game mode 
+
+### game mode and class
+
+```{r}
+kruskal.test(freq ~ Class ,data = df_comb_lp)
+```
+```{r}
+df_comb_lp %>%
+  ggplot(aes(x = Class , y = freq)) +
+  geom_boxplot(aes(color = Class), trim = F) +
+  geom_jitter(aes(color = Class), alpha = 1) +
+  stat_summary(
+    fun.data = "mean_sdl",
+    fun.args = list(mult = 1),
+    geom = "pointrange",
+    color = "black"
+  ) +
+  # scale_fill_manual(values = c("#00AFBB", "#E7B800"))+
+  # scale_fill_brewer(palette = "RdBu") +
+  # scale_color_brewer(palette = "RdBu") +
+  theme(legend.position = "none") +
+  theme_bw() +
+  ggtitle("freq in non game mode")
+```
+
+```{r}
+df_comb_lp %>% dunn_test(freq ~ Class)
+```
+
+```{r}
+9.287330e-02
+```
+
+
+### game mode and grades
+
+```{r}
+df_comb_lp %>% 
+  ggplot(aes(x = freq, y = sum))+
+  geom_point()
+```
+
+```{r}
+cor.test(df_comb_lp$freq, df_comb_lp$sum, method=c("spearman"))
+```
+
+
+## Corelation with survey
+
+### ANOVA
+
+```{r}
+df_comb_lp %>%
+  left_join(survey_lpa %>% mutate(username = username %>% as.numeric()),
+            by = c("id" = "username")) %>% 
+  filter(GSL_Mean != "NaN") %>% 
+  na.omit() -> survey_app
+
+
+```
+
+
+```{r}
+survey_app %>%
+  mutate(final_grade =  mc + open) %>% 
+  # poms() %>% 
+  mutate(app_act = max_n +  attempts +  max_consecutive) %>% 
+  select(Class, final_grade, app_act , ends_with("Mean")) %>% 
+  tbl_summary(by = Class) %>% add_n() %>% add_p()
+```
+
+```{r}
+survey_app %>%
+  mutate(final_grade =  mc + open) %>% 
+  mutate(app_act = scale(max_n) + scale(attempts) + scale(max_consecutive)) %>% 
+  select(Class, final_grade, app_act , ends_with("Mean")) %>% 
+  tbl_summary(by = Class) %>% add_n() %>% add_p()
+```
+
+
+```{r}
+survey_app %>%
+  mutate(final_grade =  mc + open) %>%
+  mutate(app_act = scale(max_n) + scale(attempts) + scale(max_consecutive)) %>%
+  select(-sum,
+         -max_n,
+         -attempts ,
+         -max_consecutive,
+         -mc,
+         -open,
+         -starts_with("mode")) %>%
+  select(-id, -Class) %>% 
+  scale() %>% 
+  as_tibble() ->
+  sa_scaled
+```
+
+
+```{r}
+sa_scaled
+cor.test(sa_scaled$app_act, sa_scaled$CMG_Mean, method=c("spearman"))
+cor.test(sa_scaled$app_act, sa_scaled$CPG_Mean, method=c("spearman"))
+cor.test(sa_scaled$app_act, sa_scaled$APG_Mean, method=c("spearman"))
+cor.test(sa_scaled$app_act, sa_scaled$AMG_Mean, method=c("spearman"), exact=FALSE)
+```
+
+```{r}
+sa_scaled %>% 
+ggplot(aes(x = app_act, y = AMG_Mean))+
+  geom_jitter()
+```
+
+```{r}
+library(corrplot)
+M<-cor(sa_scaled %>%   
+  #        rename(
+  #   # consistency = max_consecutive,
+  #   # use_days = max_n,
+  #   advanced_planning = max_far,
+  #   correct = freq_correct,
+  #   mean_time = m_time,
+  #   min_time = min_time,
+  #   max_time = max_time,
+  #   freq = freq
+  # ) 
+        rename(
+    # 'Days in a row' = max_consecutive,
+    # "Unique days" = max_n,
+    "Early start" = min_far,
+    "Late finish" = max_far,
+    "Correct answers" = freq_correct,
+    "Mean time" = m_time,
+    "Minimum time" = min_time,
+    "Maximum time" = max_time,
+    "Frequency of mode" = freq,
+    # "Attempts"=attempts,
+    # "Exam grade" = sum
+  )
+  )
+
+cor.mtest <- function(mat, ...) {
+    mat <- as.matrix(mat)
+    n <- ncol(mat)
+    p.mat<- matrix(NA, n, n)
+    diag(p.mat) <- 0
+    for (i in 1:(n - 1)) {
+        for (j in (i + 1):n) {
+            tmp <- cor.test(mat[, i], mat[, j], ...)
+            p.mat[i, j] <- p.mat[j, i] <- tmp$p.value
+        }
+    }
+  colnames(p.mat) <- rownames(p.mat) <- colnames(mat)
+  p.mat
+}
+# matrix of the p-value of the correlation
+p.mat <- cor.mtest(sa_scaled)
+head(p.mat[, 1:5])
+
+res1 <- cor.mtest(sa_scaled, conf.level = .95, method = "spearman")
+?cor.mtest
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+pdf(file = "corplot.pdf")
+corrplot(M, 
+         # title = "Spearman correlation. Survey and application",
+         method="color", col=col(200),  
+         type="lower", order="hclust", 
+         # addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=30, tl.offset = 0, #Text label color and rotation
+         # Combine with significance
+         p.mat = p.mat, sig.level = 0.05, insig = "blank", 
+         # hide correlation coefficient on the principal diagonal
+         diag=F 
+         )
+dev.off()
+# ?corrplot
+
+?corrplot
+```
+
+## if i read your correlations table correctly, final grade is weakly correlated with only freq_correct? 
+
+```{r}
+corrplot(M, p.mat = res1, sig.level = .05)
+```
+
+
+
+## PArtial correlation network
+
+```{r}
+
+
+library('bootnet')
+# results <- estimateNetwork(data,
+#                            default = "EBICglasso",
+#                            corMethod = "cor_auto",
+#                            tuning = 0.5)
+
+network <- estimateNetwork(sa_scaled ,
+                           default = "EBICglasso",
+                           corArgs = list(method = "spearman"),
+                           tuning = 0.5,
+                           refit = TRUE)
+```
+
+```{r}
+network %>% summary()
+```
+
+```{r}
+dev.new(width=10, height=12)
+plot(network)
+```
+
+
+```{r}
+simRes <- netSimulator(
+  network$graph,
+  dataGenerator = ggmGenerator(ordinal =
+                                 TRUE, nLevels = 5),
+  default = 'EBICglasso',
+  nCases = c(100, 250, 500, 1000, 2500),
+  tuning = 0.5,
+  nReps = 100,
+  nCores = 8
+)
+```
+
+```{r}
+simRes
+```
+```{r}
+plot(simRes)
+plot(simRes, yvar = c('strength', 'closeness',
+                      'betweenness'))
+```
+
+
+## part time and full time students 
+
+if we can make a distinction between part time and full time students (or maybe not, because the numbers are too low?) The part time and full time question refers to question 5 in the survey. 
+
+```{r}
+survey_app %>%
+  mutate(id = id %>% as.character()) %>% 
+  left_join(survey %>% 
+              select(id ,Q5)) %>% 
+  mutate(final_grade =  mc + open) %>% 
+  mutate(app_act = scale(max_n) + scale(attempts) + scale(max_consecutive)) %>% 
+  select(Class, final_grade, app_act , ends_with("Mean"), Q5) %>% 
+  tbl_summary(by = Class) %>% add_n() %>% add_p()
+```
+
+
+## is it possible to look at multiple regression?
+
+```{r}
+survey_app %>% 
+  mutate(final_grade =  mc + open) %>% 
+  ggplot(aes(x = final_grade))+
+  geom_histogram(binwidth = 1)
+```
+
+
+```{r}
+# -starts_with("mode")
+survey_app %>% 
+  # mutate(final_grade =  mc + open) %>% 
+  select(-mc, -open, -starts_with("mode")) -> lm_data
+
+# lm_data = lm_data[c(-42, -36, -6),]
+# lm_data = lm_data[c(-141, -46, -20, -47),]
+
+m2 = lm(sum ~ .-id-GSLCSL_Mean, data = lm_data)
+summary(m2)
+plot(m2)
+```
+
+```{r}
+
+m3 = lm(`Exam grade` ~ 
+          `Correct answers`:Attempts+
+          `Correct answers`+
+          Attempts+
+          `Frequency of mode`+
+          # max_far+
+          # AMG_Mean +
+          # APG_Mean+
+          TM_Mean+
+          Selfeval_Mean+
+          Selfefficacy_Mean+ Class,
+        data = lm_data %>% 
+          .[c(-35, -36, -42, -42, -7, -21, -46, -141, -17, -5, -133),] %>%
+          # .[c(-21, -46, -141, -17), ] %>%
+          # .[c(-21),] %>% 
+                  rename(
+    # 'Days in a row' = max_consecutive,
+    # "Unique days" = max_n,
+    "Early start" = min_far,
+    "Late finish" = max_far,
+    "Correct answers" = freq_correct,
+    "Mean time" = m_time,
+    "Minimum time" = min_time,
+    "Maximum time" = max_time,
+    "Frequency of mode" = freq,
+    "Attempts"=attempts,
+    "Exam grade" = sum
+  )
+        )
+summary(m3)
+plot(m3)
+```
+
+```{r}
+stargazer::stargazer(m3, type = "text")
+```
+
+```{r}
+library(sjPlot)
+library(sjmisc)
+library(ggplot2)
+theme_set(theme_sjplot())
+
+plot_model(m3_lp, type = "pred", terms = c("Correct answers", "Attempts"))+
+    theme_minimal()+
+  theme(legend.position = c(0.8, 0.2))
+
+
+plot_model(m3, type = "pred", terms = c("Correct answers", "Attempts"))+
+    theme_minimal()+
+  theme(legend.position = c(0.8, 0.2))+
+  theme(text=element_text(size=12,  family="Helvetica"))+
+  ylim(-20, 100)
+
+ggsave("sj_1.png", width = 8, height = 5)
+# plot_model(m3, type = "pred", terms = c("Selfefficacy_Mean"))
+```
+
+
+```{r}
+lm_data %>% 
+  ggplot(aes(x = freq, y = sum))+
+  geom_point()
+```
+
+
+
+```{r}
+stargazer::stargazer(m2, type = "text")
+?stargazer
+```
+
+
+### 4th class
+
+```{r}
+df_comb_lp %>%
+  full_join(survey_lpa %>% mutate(username = username %>% as.numeric()),
+            by = c("id" = "username")) %>% 
+  filter(GSL_Mean != "NaN") %>%
+  mutate(Class = Class %>% as.character() %>%  replace_na("4") %>% as.factor(),
+         across(everything(), ~ replace_na(.x, 0))) %>% 
+  select(-open, -mc) %>% 
+  mutate(id = id %>% as.character()) %>% 
+  left_join(GameAppExam %>% mutate(id = id %>% as.character()))-> survey_app_4
+
+df_comb_lp %>%
+  full_join(survey_lpa %>% mutate(username = username %>% as.numeric()),
+            by = c("id" = "username")) %>% 
+  filter(GSL_Mean != "NaN") %>%
+  mutate(Class = Class %>%
+           as.character() %>%
+            tidyr::replace_na("4") %>%
+           as.factor()
+         ) %>%
+  mutate_all(~ifelse(is.na(.x), mean(.x, na.rm = TRUE), .x))  %>% 
+  select(-open, -mc) %>% 
+  # mutate(id = id %>% as.character()) %>% 
+  left_join(GameAppExam,  by = c("id"="username")) -> survey_app_4_mean
+
+survey_app_4 %>%
+  mutate(id = id %>% as.character()) %>% 
+  left_join(survey %>% 
+              select(id ,Q5)) %>% 
+  mutate(final_grade =  mc + open) %>% 
+  mutate(app_act = scale(max_n) + scale(attempts) + scale(max_consecutive)) %>% 
+  select(Class, final_grade, app_act , ends_with("Mean"), Q5) %>% 
+  tbl_summary(by = Class) %>% add_n() %>% add_p()
+```
+
+
+```{r}
+
+
+kruskal.test(APG_Mean ~ Class ,data = survey_app_4)
+```
+
+```{r}
+survey_app_4 %>% 
+ggplot(aes(x = Class, y = APG_Mean))+
+  geom_violin(aes(fill = Class), trim = FALSE) + 
+  geom_boxplot(width = 0.2)+
+    scale_fill_brewer(palette = "RdBu")+
+  theme(legend.position = "none")+
+  theme_bw()+
+  ggtitle("Open question scores")
+```
+### only LP model
+
+```{r}
+m3_lp_with_class = lm(`Exam grade` ~ 
+            `Correct answers`:Attempts + 
+            `Correct answers`+
+             Attempts+
+          `Frequency of mode` + 
+            `Unique days`+
+            Class +
+            `Early start`
+          ,
+        data = df_comb_lp %>% 
+        select(-starts_with("mode"), -mc, -open, -id) %>% 
+          mutate(Class = relevel(Class, ref = "1")) %>% 
+  .[c(-10, -48, -62, -54, -28),] %>%
+    # .[c(-46),] %>%
+                      rename(
+    "Days in a row" = max_consecutive,
+    "Unique days" = max_n,
+    "Early start" = min_far,
+    "Late finish" = max_far,
+    "Correct answers" = freq_correct,
+    "Mean time" = m_time,
+    "Minimum time" = min_time,
+    "Maximum time" = max_time,
+    "Frequency of mode" = freq,
+    "Attempts"=attempts,
+    "Exam grade" = sum)
+  )
+summary(m3_lp)
+plot(m3_lp)
+```
+
+```{r}
+stargazer::stargazer(m3_lp ,m3_lp_with_class, type = "text")
+```
+
+```{r}
+stargazer::stargazer(m3, m3_lp, type = "text")
+```
+
+```{r}
+
+survey_app_4 %>% 
+  # single_imputation() %>% 
+  mutate(sum = open+mc) %>% 
+  # select(-open, -mc) %>%
+  # as_tibble() %>%
+  mutate(Class = as.factor(Class)) %>%
+  mutate(Class = relevel(Class, ref = 4)) -> lm_data_4
+
+lm_data_4$Class
+
+lm_data_4 %>% 
+          # .[c(-16, -140, -97, -6, -41),] %>%
+          # .[c(0),] %>% 
+            rename("Exam grade" = sum) %>% 
+          select(CMG_Mean, CPG_Mean, Selfefficacy_Mean, TM_Mean, Selfeval_Mean, Class, `Exam grade`)
+
+m4 = lm(`Exam grade` ~ 
+          # AMG_Mean+
+          # APG_Mean+
+          CMG_Mean+
+          # CPG_Mean+
+          Selfefficacy_Mean +
+          GSL_Mean+
+          # CSL_Mean+
+          # GSLCSL_Mean +
+          TM_Mean +
+          Selfeval_Mean + 
+          Class
+        ,
+        data = lm_data_4 %>% 
+          .[c(-17, -141, -181, -7, -42, -13, -207, -104, -155, -73, -193),] %>%
+          # .[c(-13, -207, -104, -155, -73, -193),] %>%
+            rename("Exam grade" = sum)
+)
+summary(m4)
+plot(m4)
+```
+
+### final regression std 
+
+```{r}
+m4 = lm(`Exam grade` ~ 
+          # AMG_Mean+
+          # APG_Mean+
+          CMG_Mean+
+          # CPG_Mean+
+          Selfefficacy_Mean +
+          GSL_Mean+
+          # CSL_Mean+
+          # GSLCSL_Mean +
+          TM_Mean +
+          Selfeval_Mean + 
+          Class
+        ,
+        data = lm_data_4 %>% 
+          .[c(-17, -141, -181, -7, -42, -13, -207, -104, -155, -73, -193),] %>%
+          # .[c(-13, -207, -104, -155, -73, -193),] %>%
+            rename("Exam grade" = sum)
+)
+summary(m4)
+plot(m4)
+
+lm.beta::lm.beta(m4) 
+```
+
+
+
+```{r}
+survey_app_4_mean$`MC-SCORE (max 60)`
+
+survey_app_4_mean %>% 
+  mutate(open = case_when(
+    open == "NA" ~ NA_real_,
+    TRUE ~ open),
+    mc = case_when(
+    mc == "NA" ~ NA_real_,
+    TRUE ~ mc)
+    ) %>% 
+  single_imputation() %>% 
+  mutate(sum = open+mc) %>% 
+  # select(-open, -mc) %>% 
+  as_tibble() %>%
+  mutate(Class = as_factor(Class)) %>% 
+  mutate(Class = stats::relevel(Class, ref = "4"))-> lm_data_4
+
+m4 = lm(sum ~ 
+          AMG_Mean+ 
+          APG_Mean+
+          # CMG_Mean+CPG_Mean+
+          Selfefficacy_Mean+
+          # GSL_Mean+CSL_Mean+
+          TM_Mean+Selfeval_Mean+
+          Class,
+        data = lm_data_4 %>% .[c(-7, -193, -6, -141, -181, -155),]
+)
+summary(m4)
+plot(m4)
+```
+
+
+```{r}
+?stargazer
+# stargazer::stargazer(m3, m3_lp, m4, type = "html")
+stargazer::stargazer(m3_lp, m3, m4, 
+                     type = "html",  
+                     single.row=TRUE,
+order = c("Constant",
+          "`Correct answers`", "Attempts", "`Frequency of mode`", "`Unique days`", "`Early start`", 
+"TM_Mean", "Selfeval_Mean", "Selfefficacy_Mean", "CMG_Mean" , "GSL_Mean",  
+"Class1","Class2", "Class3"),
+                     out = "regression_tables.doc",
+                     title = "Final grades model")
+
+tab_model(m3_lp, m3, m4, collapse.ci = TRUE, show.reflvl = TRUE, show.aic = T, title = "Final grades models", p.style = "stars")
+?tab_model
+```
+
+```{r}
+library(gamair)
+# data("mpg", package="gamair")
+
+library(mgcv)
+# Fit the model
+mod_1 <- gam(sum ~ s(AMG_Mean)+ 
+          s(APG_Mean)+
+          s(CMG_Mean)+s(CPG_Mean)+
+          s(Selfefficacy_Mean)+
+          s(GSL_Mean)+s(CSL_Mean)+
+          s(TM_Mean)+s(Selfeval_Mean)+
+          Class
+          , data = lm_data_4, method = "REML")
+
+# View the summary
+summary(mod_1)
+plot(mod_1)
+```
+
+```{r}
+plot(mod_1, rug = TRUE, residuals = TRUE,
+     pch = 1, cex = 1)
+
+plot(mod_1, shade = TRUE, shade.col = "lightblue")
+
+plot(mod_1,  shade = TRUE, shade.col = "lightblue", 
+     shift = coef(mod_1)[1], seWithMean = TRUE)
+```
+
+```{r}
+gam.check(mod_1)
+```
+
+```{r}
+concurvity(mod_1, full = TRUE)
+```
+
+```{r}
+stargazer::stargazer(mod_1, type = "text")
+```
+
+```{r}
+mod_3_lp = gam(sum ~ 
+                 s(max_consecutive) +
+                 s(max_n) + s(min_far) + s(max_far) +
+                 s(freq_correct) + s(attempts) +
+                 s(freq),             # s(freq_correct ,attempts),
+        data = df_comb_lp %>% select(-starts_with("mode"), -mc, -open, -id, -ends_with("time")) %>% 
+          mutate(Class = relevel(Class, ref = "2")), method = "REML")
+
+summary(m3_lp)
+plot(m3_lp)
+
+# View the summary
+summary(m3_lp)
+plot(m3_lp)
+```
+```{r}
+mod_3_lp = gam(sum ~ 
+                 max_consecutive +
+                 s(max_n) + s(min_far) + s(max_far) +
+                 s(freq_correct) + s(attempts) +
+                 s(freq) + Class +
+                 s(m_time) + s(min_time) + s(max_time) +
+                 te(freq_correct, attempts),
+        data = df_comb_lp %>% 
+          select(-starts_with("mode"), -mc, -open, -id) %>% 
+          mutate(Class = relevel(Class, ref = "1")), method = "REML")
+summary(mod_3_lp)
+plot(mod_3_lp)
+
+?gam
+```
+
+### GLM
+
+```{r}
+glm4 = glm(`Exam grade` ~ 
+          # AMG_Mean+
+          # APG_Mean+
+          CMG_Mean+
+          CPG_Mean+
+          Selfefficacy_Mean +
+          # GSL_Mean+
+          # CSL_Mean+
+          GSLCSL_Mean +
+          TM_Mean +
+          Selfeval_Mean + 
+          Class
+        ,
+        family = "gaussian",
+        data = lm_data_4 %>% 
+          .[c(-17, -141, -181, -7, -42, -13, -207, -104, -155, -73, -193),] %>%
+          # .[c(-13, -207, -104, -155, -73, -193),] %>%
+            rename("Exam grade" = sum)
+)
+
+
+summary(glm4)
+plot(glm4)
+
+with(summary(glm4), 1 - deviance/null.deviance)
+```
+
+# FA
+
+```{r}
+library(polycor)
+corrr<- hetcor(lm_data_4 %>% select(-id, -Class) %>% select(ends_with("Mean")))
+corrr <- corrr$correlations
+
+
+cor.mtest <- function(mat, ...) {
+    mat <- as.matrix(mat)
+    n <- ncol(mat)
+    p.mat<- matrix(NA, n, n)
+    diag(p.mat) <- 0
+    for (i in 1:(n - 1)) {
+        for (j in (i + 1):n) {
+            tmp <- cor.test(mat[, i], mat[, j], ...)
+            p.mat[i, j] <- p.mat[j, i] <- tmp$p.value
+        }
+    }
+  colnames(p.mat) <- rownames(p.mat) <- colnames(mat)
+  p.mat
+}
+# matrix of the p-value of the correlation
+p.mat <- cor.mtest(corrr)
+
+corrplot(corrr,          method="color", col=col(200),  
+         type="lower", order="hclust", 
+         # addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=30, tl.offset = 0, #Text label color and rotation
+         # Combine with significance
+         p.mat = p.mat, sig.level = 0.1, insig = "blank", 
+         # hide correlation coefficient on the principal diagonal
+         diag=T )
+
+corrplot(M, 
+         # title = "Spearman correlation. Survey and application",
+         method="color", col=col(200),  
+         type="lower", order="hclust", 
+         # addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=30, tl.offset = 0, #Text label color and rotation
+         # Combine with significance
+         p.mat = p.mat, sig.level = 0.05, insig = "blank", 
+         # hide correlation coefficient on the principal diagonal
+         diag=T 
+         )
+```
+
+```{r}
+library(psych)
+
+alpha(corrr)
+
+fa(corrr, nfactors=3, rotate="varimax", fm="ml") 
+factor.plot(fa(corrr, nfactors=3, rotate="varimax", fm="ml"))
+fa.diagram(fa(corrr, nfactors=3, rotate="oblimin", fm="ml"))
+
+efa_1 <- fa(corrr, nfactors=3, rotate="oblimin", fm="ml", scores = TRUE ,n.obs = 224 , n.iter = 100)
+# ?fa
+summary(efa_1)
+efa_1
+fascores <- factor.scores(lm_data_4 %>% select(-id, -Class) %>% select(ends_with("Mean")) %>% as.matrix(), efa_1)
+
+
+# fascores$scores
+```
+
+```{r}
+fascores$scores %>% 
+  as_tibble() %>% 
+  mutate(username = lm_data_4$id %>% as.character(),
+          LP = lm_data_4$Class,
+         grade_sum = lm_data_4$sum) %>% 
+  left_join(survey1 %>% select(username ,age, gender, full_part)) %>% 
+  na.omit() %>% 
+  select(-username) %>% 
+  mutate(full_part = full_part %>%  as.factor(),
+         gender = gender %>% as.factor())-> lm_data_FA
+
+lm_data_FA
+```
+
+```{r}
+lm_fa_1 <- lm(grade_sum~ .-age-gender, data = lm_data_FA)
+summary(lm_fa_1)
+plot(lm_fa_1)
+```
+
+```{r}
+gam_fa = gam(grade_sum ~ 
+                 LP + 
+                 s(ML1)+ s(ML2) + s(ML3) + 
+               full_part,
+        data = lm_data_FA, method = "REML")
+summary(gam_fa)
+plot(gam_fa)
+```
+
+
+
+```{r}
+# mfin.model <- 'M1 =~ BSBM14A + BSBM14B + BSBM14C + BSBM14D + BSBM14E
+#             M2 =~ BSBM16A + BSBM16B + BSBM16C + BSBM16D + BSBM16E + BSBM16F + BSBM16G + BSBM16H + BSBM16I
+#             M3 =~ '
+# ?lavaan::cfa
+# fit <- lavaan::cfa(fin.model, data = fin)
+# semPaths(fit, title = FALSE, curvePivot = TRUE)
+# summary(fit, fit.measures = TRUE)
+# standardizedSolution(fit)
+```
+
+## FA 2
+
+```{r}
+survey1 %>% 
+  count(username)
+
+survey1 %>% 
+  filter(consent == 1) %>% 
+  filter(username != 454135) %>% 
+  mutate(username = as.numeric(username)) %>% 
+  select(-recordeddate, -consent, -age ,-gender, -full_part) %>% 
+  na.omit() %>% 
+  left_join(GameAppExam %>% mutate_all(as.numeric) %>% unique()) %>% 
+  single_imputation() -> survey1_to_fa
+
+survey1 %>% 
+  filter(consent == 1) %>% 
+  filter(username != 454135) %>% 
+  select(-recordeddate, -consent, -age ,-gender, -full_part) %>% 
+  single_imputation() %>%
+  na.omit() %>% 
+  left_join(GameAppExam %>% mutate_all(as.numeric) %>% unique()) %>% 
+  single_imputation() -> survey1_to_fa_imputed
+
+# survey1 %>% 
+#   filter(consent == 1) %>% 
+#   mutate(username = as.numeric(username)) %>%
+#   filter(username != 454135) %>% 
+#   select(-recordeddate, -consent, -age ,-gender, -full_part) %>% 
+#   left_join(GameAppExam %>% mutate_all(as.numeric) %>% unique()) -> survey1_to_fa_missing
+
+GameAppExam %>% mutate_all(as.numeric) 
+
+survey1_to_fa
+
+corrr_s1<- hetcor(survey1_to_fa %>% select(-username))
+corrr_s1 <- corrr_s1$correlations
+
+
+cor.mtest <- function(mat, ...) {
+    mat <- as.matrix(mat)
+    n <- ncol(mat)
+    p.mat<- matrix(NA, n, n)
+    diag(p.mat) <- 0
+    for (i in 1:(n - 1)) {
+        for (j in (i + 1):n) {
+            tmp <- cor.test(mat[, i], mat[, j], ...)
+            p.mat[i, j] <- p.mat[j, i] <- tmp$p.value
+        }
+    }
+  colnames(p.mat) <- rownames(p.mat) <- colnames(mat)
+  p.mat
+}
+# matrix of the p-value of the correlation
+p.mat <- cor.mtest(corrr_s1)
+
+corrplot(corrr_s1,          method="color", col=col(200),  
+         type="lower", order="hclust", 
+         # addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=30, tl.offset = 0, #Text label color and rotation
+         # Combine with significance
+         p.mat = p.mat, sig.level = 0.1, insig = "blank", 
+         # hide correlation coefficient on the principal diagonal
+         diag=T )
+
+alpha(corrr_s1)
+
+fa(corrr_s1, nfactors=5, rotate="varimax", fm="ml") 
+factor.plot(fa(corrr_s1, nfactors=5, rotate="varimax", fm="ml"))
+fa.diagram(fa(corrr_s1, nfactors=8, rotate="oblimin", fm="ml"))
+
+efa_2 <- fa(corrr_s1, nfactors=8, rotate="oblimin", fm="ml", scores = TRUE ,n.obs = 224 , n.iter = 20)
+# ?fa
+summary(efa_2)
+efa_2
+
+fascores_2 <- factor.scores(survey1_to_fa %>% select(-username) %>% as.matrix(), efa_2)
+```
+
+
+
+
+
+```{r}
+fascores_2$scores %>% 
+  as_tibble() %>% 
+  mutate(username = survey1_to_fa$username) %>% 
+  left_join(survey1 %>% select(username ,age, gender, full_part)) %>% 
+  group_by(username) %>% 
+  mutate(n = n()) %>% 
+  filter(n == 1) %>% 
+  select(-n) %>% 
+  mutate(full_part = full_part %>%  as.factor(),
+         gender = gender %>% as.factor(),
+         id = username %>% as.numeric()) %>% 
+  left_join(lm_data_4 %>% select(id, Class, sum)) %>% 
+  select(-id)-> lm_data_FA_2
+
+lm_data_FA_2
+```
+
+```{r}
+lm_fa_2 <- lm(sum~ .-username - age - ML5- ML1, data = lm_data_FA_2)
+summary(lm_fa_2)
+plot(lm_fa_2)
+```
+
+## CFA
+
+```{r}
+sjmisc::reliab_test(survey1_to_fa %>% select(starts_with("AMG")), scale.items = FALSE, digits = 3)
+
+psych::alpha(survey1_to_fa %>% select(starts_with("AMG")) )
+```
+
+
+Selfeval_Mean
+Selfefficacy_Mean
+GSL_Mean
+
+
+```{r}
+names(survey1_to_fa) %>% as_tibble() %>% arrange(value)
+```
+
+
+```{r}
+# survey1_to_sem_missings %>%
+#   select(starts_with("Selfeval"),  starts_with("GSL")) %>% na.omit() %>%
+#   cor()
+# 
+# corrplot()
+
+
+M<-survey1_to_sem_missings %>%
+  select(starts_with("Selfeval"),  
+         starts_with("GSL"), -GSL_3, -GSL_5, 
+         starts_with("Selfefficacy"), 
+         starts_with("TM"),
+         starts_with("APG"),
+         starts_with("CMG"),
+         starts_with("CPG"),
+         starts_with("CSL") ,
+         starts_with("GSL")) %>% na.omit() %>%
+  cor()
+
+
+# matrix of the p-value of the correlation
+# p.mat <- cor.mtest(M)
+# head(p.mat[, 1:5])
+
+p.mat <- cor.mtest(M, conf.level = .95, method = "spearman")
+# ?cor.mtest
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+# pdf(file = "corplot.pdf")
+corrplot(M, 
+         # title = "Spearman correlation. Survey and application",
+         method="color", col=col(200),  
+         type="lower", 
+         # order="hclust", 
+         # addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=30, tl.offset = 0, #Text label color and rotation
+         # Combine with significance
+         p.mat = p.mat, sig.level = 0.05, insig = "blank", 
+         # hide correlation coefficient on the principal diagonal
+         diag=T 
+         )
+# dev.off()
+```
+
+
+```{r}
+
+mfin.model <- 'AMG =~ AMG_1 + AMG_2 + AMG_3 + AMG_4
+   APG =~ APG_1 + APG_2 + APG_3 + APG_4
+   CMG =~ CMG_1+ CMG_2 + CMG_3 + CMG_4 + CMG_5 + CMG_6 + CMG_7 + CMG_8
+   CPG =~ CPG_1 + CPG_2 + CPG_3 + CPG_4 + CPG_5 + CPG_6 + CPG_7 + CPG_8
+   CSL =~ CSL_1 + CSL_2 + CSL_3
+   GSL =~ GSL_1 + GSL_2 + GSL_3 + GSL_4 + GSL_5
+   Selfefficacy =~ Selfefficacy_0 + Selfefficacy_2 + Selfefficacy_3 + Selfefficacy_4 + Selfefficacy_5 + Selfefficacy_6 + Selfefficacy_7 + Selfefficacy_8
+   Selfeval =~ Selfeval_1 + selfeval_2 + selfeval_3 + Selfeval_4 + Selfeval_5 + Selfeval_6
+   TM =~ TM_1 + TM_2 + TM_3 + TM_4 + TM_5 + TM_6 + TM_7_reversed + TM_8_reversed'
+
+mfin.model <- 'Selfefficacy =~ Selfefficacy_0 + Selfefficacy_2 + Selfefficacy_3 + Selfefficacy_4 + Selfefficacy_5 + Selfefficacy_6 + Selfefficacy_7 + Selfefficacy_8
+   Selfeval =~ Selfeval_1 + selfeval_2 + selfeval_3 + Selfeval_4 + Selfeval_5 + Selfeval_6 + GSL_1 + GSL_2  + GSL_4
+   # GSL =~ GSL_1 + GSL_2 + GSL_3 + GSL_4 + GSL_5
+   TM =~ TM_1 + TM_3 + TM_4 + TM_5 + TM_6 + TM_7_reversed + TM_8_reversed
+'
+
+fit <- lavaan::cfa(mfin.model, data = survey1_to_sem_missings, 
+                   estimator = "MLR", missing = "fiml")
+
+# library(semPlot)
+semPaths(fit, "par", weighted = FALSE, nCharNodes = 7, shapeMan = "rectangle",
+         sizeMan = 8, sizeMan2 = 10)
+
+lavInspect(fit, "cor.lv")
+
+?semPaths
+lavaan::summary(fit, fit.measures = TRUE)
+
+standardizedSolution(fit)
+```
+
+
+
+  Comparative Fit Index (CFI)                    0.976+
+  Tucker-Lewis Index (TLI)                       0.928+
+  RMSEA                                          0.128-
+  SRMR                                           0.031+
+
+e used three measures of goodness of fit recommended 
+by the majority of modern SEM guidebooks: CFI (Comparative Fit Index), acceptable CFI values ≥ 0.90; 
+RMSEA (Root Mean Square Error of Approximation), 
+acceptable RMSEA values ≤ 0.05; and SRMR
+(Standardized Root Mean Square Residual), acceptable SRMR values ≤ 0.08. 
+
+These are indicators of differences between the original 
+covariance matrix and the matrix of covariances of the model, which 
+allow the researcher to measure the goodness of fit of a model to a set 
+of observations [Nasledov 2012: 348–353]. A comparison of f
+
+
+```{r}
+survey1_to_fa %>% 
+  left_join(survey1 %>% select(username ,age, gender, full_part)) %>% 
+  group_by(username) %>% 
+  mutate(n = n()) %>% 
+  filter(n == 1) %>%
+  ungroup() %>% 
+  select(-n) %>% 
+  mutate(full_part = full_part %>%  as.factor(),
+         gender = gender %>% as.factor(),
+         id = username %>% as.numeric()) %>% 
+  left_join(lm_data_4 %>% select(id, Class, sum)) %>% 
+  select(-id)-> survey1_to_sem
+
+# survey1_to_sem$survey1_to_sem
+
+survey1_to_sem %>% 
+  sjmisc::to_dummy(Class, suffix = "label") %>% 
+  bind_cols(survey1_to_sem) -> survey1_to_sem
+
+
+set.seed(42)
+survey1_to_fa_imputed %>%
+  left_join(df_comb_lp %>% 
+              select(id, Class) %>% 
+              rename(username = id) %>% 
+              mutate(Class = Class %>% as.numeric())) %>% 
+  mutate(Class = Class %>% tidyr::replace_na(4) %>% as.factor()) %>% 
+  mutate(Class = stats::relevel(Class, ref = "4")) %>% 
+  sjmisc::to_dummy(Class, suffix = "label") %>% 
+  bind_cols(survey1_to_fa_imputed) %>% 
+  rename(test_grades = MC.SCORE..max.60.,
+         open_grades = Open.ended.questions..max.40.) %>% 
+  mutate(final_grade = test_grades + open_grades) %>% 
+    filter(final_grade < 100)-> survey1_to_sem_imputed
+
+
+survey1 %>%
+  filter(consent == 1) %>%
+  mutate(username = as.numeric(username)) %>%
+  filter(username != 454135) %>%
+  select(-recordeddate, -consent,) %>%
+  left_join(GameAppExam %>% mutate_all(as.numeric) %>% unique()) %>%
+  left_join(df_comb_lp %>%
+              select(id, Class) %>%
+              rename(username = id) %>%
+              mutate(Class = Class %>% as.numeric())) %>%
+  mutate(Class = Class %>% tidyr::replace_na(4) %>% as.factor()) %>%
+  mutate(Class = stats::relevel(Class, ref = "4")) -> survey1_to_fa_missings
+
+survey1_to_fa_missings %>%
+  sjmisc::to_dummy(Class, suffix = "label") %>%
+  bind_cols(survey1_to_fa_missings) %>%
+  rename(test_grades = `MC-SCORE (max 60)`,
+         open_grades = `Open-ended questions (max 40)`) %>%
+  mutate(final_grade = test_grades + open_grades) %>%
+  mutate(TM_3 =TM_3 %>% replace_na(value = 0) %>% reverse_scale() %>% na_if(8),
+         TM_7_reversed = TM_7_reversed %>% replace_na(value = 0) %>% reverse_scale() %>% na_if(8),
+         TM_8_reversed = TM_8_reversed %>% replace_na(value = 0) %>% reverse_scale() %>% na_if(8))  -> survey1_to_sem_missings
+
+survey1_to_sem_missings$final_grade
+```
+
+### MICE
+
+```{r}
+
+```
+
+
+
+```{r}
+??mvn
+# library(MVN)
+MVN::mvn(data = survey1_to_sem_imputed %>% select(-username, -starts_with("Class")))
+```
+
+
+```{r}
+
+mfin.model_sem <- '
+# Measurement model
+Selfefficacy =~ Selfefficacy_0 + Selfefficacy_2 + Selfefficacy_3 + Selfefficacy_4 + Selfefficacy_5 + Selfefficacy_6 + Selfefficacy_7 + Selfefficacy_8
+   Selfeval =~  selfeval_2 + selfeval_3 + Selfeval_4 + Selfeval_5 + Selfeval_6 
+   TM =~ TM_1 + TM_3 + TM_4 + TM_5 + TM_6 + TM_7_reversed + TM_8_reversed
+   
+   # Final_grade <~ test_grades + open_grades
+   
+# Structural model 
+# Regressions
+
+final_grade ~ Selfefficacy * TM + Class_1 + Class_2 + Class_3 + TM + Selfefficacy + Selfeval
+
+
+final_grade ~ 1
+'
+
+fit_sem <- lavaan::sem(mfin.model_sem, data = survey1_to_sem_missings %>% 
+                         # na.omit() %>%
+                    filter(!username %in% c(73834, 453095 ,485167, 479665))
+                         # mutate(final_grade = final_grade %>% scale())
+                       ,missing = "fiml" , meanstructure=F, 
+                       ridge = T,
+                       estimator = "MLR")
+fit_sem
+# ULS 
+# DWLS
+# ULSMV
+# ULSMVS
+# WLSMV 
+?sem
+
+?semPaths
+semPaths(fit_sem, what = "col", whatLabels = "par", style = "mx", 
+         rotation = 2, layout = "tree2", mar = c(1, 2, 1, 2), nCharNodes = 7,
+         shapeMan = "rectangle", sizeMan = 8, sizeMan2 = 5, 
+         filetype = "jpg", filename = "SEM")
+```
+
+```{r}
+?fitMeasures
+fitMeasures(fit_sem, 
+            fit.measures = c("chisq", "df", "pvalue", "cfi", "rmsea", "tli", "SRMR"), 
+            output = "text")
+```
+
+
+```{r}
+lavaan::summary(fit_sem, fit.measures = TRUE, standardized = TRUE, rsq=TRUE)
+```
+
+```{r}
+# lm_data_4 %>% 
+#   sjmisc::to_dummy(Class, suffix = "label") %>% 
+#   bind_cols(lm_data_4) -> lm_data_4_to_sem
+# 
+# model_mean = '
+#   # Structural model 
+#   # Regressions
+#   sum ~ Selfefficacy_Mean + GSL_Mean + Selfeval_Mean + Class_1 + Class_2 + Class_3
+# 
+#   sum ~ 1'
+# 
+# fit_sem_reg <- lavaan::sem(model_mean, data = lm_data_4_to_sem)
+# fit_sem_reg
+# 
+# lavaan::summary(fit_sem_reg, fit.measures = TRUE ,rsq=TRUE)
+```
+
+```{r}
+?semPaths
+semPaths(fit_sem, what = "col", whatLabels = "par", style = "mx", 
+         rotation = 2, layout = "tree2", mar = c(1, 2, 1, 2), nCharNodes = 7,
+         shapeMan = "rectangle", sizeMan = 8, sizeMan2 = 5)
+```
+
+```{r}
+survey1_to_fa %>% 
+  left_join(survey1 %>% 
+              select(username ,age, gender, full_part) %>% 
+              mutate(username = username %>% as.numeric())) %>% 
+  group_by(username) %>% 
+  mutate(n = n()) %>% 
+  filter(n == 1) %>%
+  ungroup() %>% 
+  select(-n) %>% 
+  mutate(full_part = full_part %>%  as.factor(),
+         gender = gender %>% as.factor(),
+         id = username %>% as.numeric()) %>% 
+  left_join(lm_data_4 %>% select(id, Class, sum)) %>% 
+  select(-id)-> survey1_to_sem
+
+# survey1_to_sem$survey1_to_sem
+
+reverse_scale <- function(x){
+    return(max(x)-x + 1)
+}
+
+survey1_to_sem %>% 
+  sjmisc::to_dummy(Class, suffix = "label") %>% 
+  bind_cols(survey1_to_sem) %>% 
+  mutate(TM_3 = reverse_scale(TM_3), 
+         TM_7_reversed = reverse_scale(TM_7_reversed), 
+         TM_8_reversed = reverse_scale(TM_8_reversed))-> survey1_to_sem_fixed
+
+
+# survey1_to_fa_missing$TM_1 %>% replace_na(value = 0) %>% reverse_scale() %>% na_if(8)
+# 
+# survey1_to_fa_missing %>% 
+#   left_join(lm_data_4 %>% select(id, Class, sum), by = c("username" = "id")) %>% 
+#   sjmisc::to_dummy(Class, suffix = "label") %>% 
+#   bind_cols(survey1_to_fa_missing) %>% 
+#     mutate(TM_3 =TM_3 %>% replace_na(value = 0) %>% reverse_scale() %>% na_if(8), 
+#          TM_7_reversed = TM_7_reversed %>% replace_na(value = 0) %>% reverse_scale() %>% na_if(8), 
+#          TM_8_reversed = TM_8_reversed %>% replace_na(value = 0) %>% reverse_scale() %>% na_if(8)) -> survey1_to_sem_missings
+```
+
+
+
+```{r}
+survey1_to_sem_fixed %>%
+  select(starts_with("CMG")) %>%
+  # select(-TM_3,  -TM_7_reversed , - TM_8_reversed)%>%
+  psych::alpha()
+# 
+# survey1_to_sem %>% 
+#   select(starts_with("TM")) %>% 
+#   psych::alpha(keys = c("TM_3",  "TM_7_reversed" , "TM_8_reversed"))
+  
+
+# survey1_to_sem %>% 
+#   select(starts_with("TM")) %>% 
+#   cor()
+# ?alpha
+
+# AMG =~ AMG_1 + AMG_2 + AMG_3 + AMG_4
+   # APG =~ APG_1 + APG_2 + APG_3 + APG_4
+   # CMG =~ CMG_1+ CMG_2 + CMG_3 + CMG_4 + CMG_5 + CMG_6 + CMG_7 + CMG_8
+   # CPG =~ CPG_1 + CPG_2 + CPG_3 + CPG_4 + CPG_5 + CPG_6 + CPG_7 + CPG_8
+   # CSL =~ CSL_1 + CSL_2 + CSL_3
+   # GSL =~ GSL_1 + GSL_2 + GSL_3 + GSL_4 + GSL_5
+
+mfin.model_sem_3 <- '
+# Measurement model
+Selfefficacy =~ Selfefficacy_0 + Selfefficacy_2 + Selfefficacy_3 + Selfefficacy_4 + Selfefficacy_5 + Selfefficacy_6 + Selfefficacy_7 + Selfefficacy_8
+   Selfeval =~ Selfeval_1 + selfeval_2 + selfeval_3 + Selfeval_4 + Selfeval_5 + Selfeval_6
+   GSL =~ GSL_1 + GSL_2 + GSL_3 + GSL_4 + GSL_5
+   
+   # SelfevalGSL =~ Selfeval + GSL
+   
+# Structural model
+# Regressions
+
+sum ~ Selfefficacy + Selfeval + GSL + Class_1 + Class_2 + Class_3
+
+sum ~ 1
+'
+set.seed(2)
+fit_sem_3 <- lavaan::sem(mfin.model_sem_3, data = survey1_to_sem_fixed %>% select(-username) %>% na.omit() %>% mutate(sum = scale(sum)), meanstructure=F ,ridge = T, estimator = "MLM")
+# DWLS
+# ULSMV
+# WLSMV 
+# estimator = "MLM")
+varTable(fit_sem_3)
+fit_sem_3
+
+semPaths(fit_sem_3, what = "col", whatLabels = "par", style = "mx", 
+         rotation = 2, layout = "tree2", mar = c(1, 2, 1, 2), nCharNodes = 7,
+         shapeMan = "rectangle", sizeMan = 8, sizeMan2 = 5)
+```
+
+```{r}
+lavaan::summary(fit_sem_3, fit.measures = TRUE ,rsq=TRUE, standardized = F)
+```
+
+
+```{r}
+?lavInspect
+lavaan::lavInspect(fit_sem_3, "cor.lv")
+```
+
+```{r}
+# library(polycor)
+corrr_3<- polycor::hetcor(survey1_to_sem_fixed %>% 
+                 select(-username, -Class) %>% 
+                 select(
+                   starts_with("Selfefficacy"),
+                   starts_with("Selfeval"),
+                   starts_with("TM"),
+                   starts_with("GSL")
+                   )
+               )
+corrr_3 <- corrr_3$correlations
+
+corrr_3
+
+efa_3 <-  psych::fa(corrr_3, nfactors=4, rotate="oblimin", fm="ml", scores = TRUE ,n.obs = 224)
+efa_3
+
+# png(filename = "FA.png", width = 1200)
+pdf(file = "FA.pdf")
+psych::fa.diagram(efa_3)
+dev.off()
+
+?fa
+```
+
+```{r}
+# stargazer::stargazer(fit_sem_3, summary=FALSE, type='text', rownames=FALSE, initial.zero=FALSE, digits=3, title='Predicting Y')
+```
+
+## SEM PLOTS
+
+```{r}
+library(tidySEM)
+graph_sem(model = fit_sem_3)
+```
+
+```{r}
+# ?semPaths
+semPaths(fit_sem,
+         title = T,
+         curvePivot = TRUE,
+         what = "std",
+         rotation = 3,
+         layout = "tree2",
+         optimizeLatRes = TRUE,
+         intercepts = FALSE,
+         edge.label.cex = 0.95,
+         exoVar=T,
+         sizeMan=5,
+         sizeLat=7,
+         nCharNodes=5,
+         residuals=T,
+         fixedStyle=1,
+         freeStyle=1,
+         curvePivot = T,
+         thresholds = FALSE)
+```
+
+```{r}
+library(mvoutlier)
+
+plot(survey1_to_sem_fixed)
+
+Y <- survey1_to_sem_fixed %>% 
+  # filter(!username %in% c(478845 ,479549 ,485167 ,482613 ,73834)) %>% 
+  select(-starts_with("Class"), -sum, -age, -gender ,-full_part) %>% 
+  column_to_rownames("username") %>% 
+  mutate_all(as.numeric) %>% 
+  as.matrix()
+
+res <- aq.plot(Y ,quan =0.95 ,alpha = 0.1)
+?aq.plot
+
+478845
+479549
+
+485167
+482613
+73834
+
+res$outliers %>% 
+  enframe() %>% 
+mutate(name = name %>% as.numeric()) %>% 
+  arrange(name) %>% 
+  filter(name %in% c(478845 ,479549 ,485167 ,482613 ,73834))
+```
+
+```{r}
+library(faoutlier)
+#Confirmatory with lavaan
+model_test <- 'F1 =~  Remndrs + SntComp + WrdMean
+F2 =~ MissNum + MxdArit + OddWrds
+F3 =~ Boots + Gloves + Hatchts'
+
+(FS_test <- forward.search(holzinger, model_test))
+(FS.outlier <- forward.search(holzinger.outlier, model_test))
+plot(FS_test)
+plot(FS.outlier)
+```
+
+
+```{r}
+(FS <- forward.search(survey1_to_sem_fixed %>% na.omit(), mfin.model_sem_3))
+# (FS.outlier <- forward.search(holzinger.outlier, mfin.model_sem_3))
+plot(FS)
+# plot(FS.outlier)
+```
+
+```{r}
+# fscores_sem_3 <- lavPredict(fit_sem)
+
+fscores_sem_3 <- lavPredict(fit_sem)
+
+fscores_sem_3 %>% 
+  as_tibble() %>% cor()
+
+fscores_sem_3 %>% 
+  as_tibble() %>% 
+  bind_cols(survey1_to_sem_missings %>% 
+              filter(!username %in% c(73834, 453095 ,485167, 479665))) -> lm_fscores
+
+
+lm_fscores %>% 
+  filter(Class_4 == 0)
+
+m5 = lm(final_grade ~ 
+          Class*Selfefficacy +
+          Class*TM +
+          Class*Selfeval +
+          Class 
+        ,data = lm_fscores %>% 
+    dplyr::select(Class, Selfefficacy, TM ,Selfeval ,username, final_grade) %>%
+          filter(!username %in% c(73834, 453095 ,485167, 479665)) %>%
+          column_to_rownames("username"))
+
+summary(m5)
+plot(m5)
+
+lm_fscores %>% 
+          filter(username %in% c(73834, 453095 ,485167, 479665)) %>% 
+  left_join(cooks.distance(m5) %>% 
+              enframe(name ="username", value =  "cooks.distance") %>% 
+              mutate(username = username %>% as.numeric()))
+# car::vif(m5)
+```
+
+```{r}
+?stargazer
+
+stargazer::stargazer(m5, 
+                     type = "html",  out = "final_regression.html",
+                     single.row=F)
+```
+
+
+```{r}
+library(sjPlot)
+
+
+plot_model(m5, type = "pred", terms = c("Selfefficacy" ,"TM", "Class"))+
+    theme_minimal()+
+  # theme(legend.position = c(0.8, 0.2))+
+  theme(text=element_text(size=12,  family="Helvetica"))
+
+plot_model(m5, type = "pred", terms = c("Selfefficacy" ,"Class"))+
+    theme_minimal()+
+  # theme(legend.position = c(0.8, 0.2))+
+  theme(text=element_text(size=12,  family="Helvetica"))
+
+
+plot_model(m5, type = "pred", terms = c("TM", "Class"))+
+    theme_minimal()+
+  # theme(legend.position = c(0.8, 0.2))+
+  theme(text=element_text(size=12,  family="Helvetica"))
+
+
+plot_model(m5, type = "pred", terms = c("Selfeval"))+
+    theme_minimal()+
+  # theme(legend.position = c(0.8, 0.2))+
+  theme(text=element_text(size=12,  family="Helvetica"))
+```
+
+## robust
+
+```{r}
+library(MASS)
+rm5 = rlm(final_grade ~ 
+          # AMG_Mean+
+          # APG_Mean+
+          # CMG+
+          # CPG_Mean+
+          Class*Selfefficacy +
+          # GSL+
+          # CSL_Mean+
+          # GSLCSL_Mean +
+          Class*TM +
+          Class*Selfeval +
+          Class 
+        ,data = lm_fscores %>% 
+          # filter(final_grade< 85) %>% 
+          filter(!username %in% c(73834, 453095 ,485167, 479665)) %>%
+          column_to_rownames("username")
+         ,psi = psi.bisquare)
+
+summary(rm5)
+```
+
+
+
+```{r}
+iweights <- data.frame(user = lm_fscores %>% 
+                         dplyr::select(Class, Selfefficacy, TM ,Selfeval ,username, final_grade) %>% 
+                         na.omit() %>% 
+                         .$username,
+                       resid = rm5$resid,
+                       weight = rm5$w)
+
+iweights %>% arrange(weight)
+biweights2 <- biweights[order(rr.bisquare$w), ]
+biweights2[1:15, ]
+```
+
+## bootstrap
+
+```{r}
+
+
+sample.data = lm_fscores %>% 
+    dplyr::select(Class, Selfefficacy, TM ,Selfeval ,username, final_grade)
+
+# Containers for the coefficients
+# sample_coef_intercept <- NULL
+# sample_coef_x1 <- NULL
+sample_coefs <- tibble()
+
+for (i in 1:1000) {
+  #Creating a resampled dataset from the sample data
+  sample_d = sample.data[sample(1:nrow(sample.data), nrow(sample.data), replace = TRUE), ]
+  
+  #Running the regression on these data
+  model_bootstrap <- lm(final_grade ~ 
+          Class*Selfefficacy +
+          Class*TM +
+          Class*Selfeval +
+          Class, data = sample_d)
+  
+  #Saving the coefficients
+  # sample_coef_intercept <-
+  #   c(sample_coef_intercept, model_bootstrap$coefficients[1])
+  # 
+  # sample_coef_x1 <-
+  #   c(sample_coef_x1, model_bootstrap$coefficients[2])
+  
+  sample_coefs <- sample_coefs %>% 
+    bind_rows(model_bootstrap$coefficients %>% 
+    enframe(name = "coef") %>% 
+    mutate(iteration = i)
+    )
+}
+```
+
+```{r}
+# means.boot = c(mean(sample_coef_intercept), mean(sample_coef_x1))
+# 
+# knitr::kable(round(
+#   cbind(
+#     population = coef(summary(population.model))[, 1],
+#     sample = coef(summary(sample.model))[, 1],
+#     bootstrap = means.boot),4), 
+#   "simple", caption = "Coefficients in different models")
+
+m5$coefficients %>% 
+    enframe(name = "coef") %>% 
+  mutate(model = "population") %>% 
+  bind_rows(
+sample_coefs %>% 
+  group_by(coef) %>% 
+  summarise(value = mean(value)) %>% 
+  mutate(model = "bootstrap")
+) %>% 
+  tidyr::pivot_wider(names_from = model, values_from = value)
+
+confint(population.model)
+confint(sample.model)
+```
+
+```{r}
+
+summary_m5 = summary(m5)$coefficients %>% 
+  as.data.frame() %>% 
+  rename(p_value = `Pr(>|t|)`) %>% 
+  rownames_to_column("coef")
+
+# summary_m5$`Pr(>|t|)`
+
+summary_m5 %>% 
+  dplyr::select(coef, p_value) %>% 
+  left_join(
+sample_coefs %>% 
+  group_by(coef) %>% 
+  summarise("boot 2.5 %" = quantile(value, prob = 0.025), 
+            "boot 97.5 %" = quantile(value, prob = 0.975)) 
+) %>% 
+  bind_cols(confint(m5) %>% as_tibble()) %>% 
+  # mutate(p_value = p_value %>% round(3)) %>% 
+  # kableExtra::kable() %>% 
+  gt::gt() %>% 
+    tab_header(
+    title = "Liner regression coefficients bootstrap"
+  ) %>% tab_style(
+    style = list(
+      cell_text(weight = "bold")
+      ),
+    locations = cells_body(
+      columns = "p_value",
+      rows = p_value <= 0.05
+    )
+  ) %>%  
+  tab_footnote(
+    footnote = "Adjusted R-squared:  0.358 of population LM",
+    locations = cells_column_labels(
+      columns = "p_value"
+    )
+  ) %>% gtsave(filename = "bootstrap.html")
+
+options(digits = 3)
+options(scipen = 5)
+```
+
+
+```{r}
+library(mgcv)
+# detach(mgcv)
+# Fit the model
+?gam
+mod_5 <- mgcv::gam(final_grade ~ 
+               s(Selfefficacy)+ 
+               s(TM)+
+               s(Selfeval)+
+               Class
+          , data = lm_fscores %>% 
+            dplyr::select(Class, Selfefficacy, TM ,Selfeval ,username, final_grade) %>% 
+            na.omit(), method = "REML")
+
+# View the summary
+summary(mod_5)
+plot(mod_5)
+```
+
+
+```{r}
+remotes::install_github("ecmerkle/blavaan", INSTALL_opts = "--no-multiarch")
+```
+
+```{r}
+library("blavaan")
+future::plan("multicore")
+
+
+model_b <- '
+# Measurement model
+Selfefficacy =~ Selfefficacy_0 + Selfefficacy_2 + Selfefficacy_3 + Selfefficacy_4 + Selfefficacy_5 + Selfefficacy_6 + Selfefficacy_7 + Selfefficacy_8
+   Selfeval =~ Selfeval_1 + selfeval_2 + selfeval_3 + Selfeval_4 + Selfeval_5 + Selfeval_6
+   GSL =~ GSL_1 + GSL_2 + GSL_3 + GSL_4 + GSL_5
+   
+   # Final_grade <~ test_grades + open_grades
+# Structural model 
+# Regressions
+
+# test_grades ~ Selfefficacy + Selfeval + GSL + Class_1 + Class_2 + Class_3
+# open_grades ~ Selfefficacy + Selfeval + GSL + Class_1 + Class_2 + Class_3
+final_grade ~ Selfefficacy + Selfeval + GSL + Class_1 + Class_2 + Class_3
+
+# test_grades ~~ open_grades
+
+final_grade ~ 1
+# test_grades ~ 1
+# open_grades ~ 1
+'
+
+# fit_sem <- lavaan::sem(model_b, data = survey1_to_sem_imputed 
+#                        %>% mutate(final_grade = final_grade %>% scale())
+#                        , meanstructure=F, ridge = T, estimator = "ULS")
+# ?bsem
+fit_bsem <- bsem(model_b, data = survey1_to_sem_imputed, bcontrol=list(cores=4))
+summary(fit_bsem)
+```
+
+```{r}
+summary(fit_bsem, neff=TRUE)
+```
+
+```{r}
+plot(fit_bsem, pars=5:10, plot.type="trace")
+plot(fit_bsem, pars=1:4, plot.type="acf")
+```
+
+```{r}
+blavPredict(fit_bsem)
+```
+
+
+## mice
+
+```{r}
+library("survey")
+library("mice")
+library("mitools")
+library("semTools")
+library("lavaan")
+library("lavaan.survey")
+```
+
+```{r}
+
+model_sem_mice <- '
+# Measurement model
+Selfefficacy =~ Selfefficacy_0 + Selfefficacy_2 + Selfefficacy_3 + Selfefficacy_4 + Selfefficacy_5 + Selfefficacy_6 + Selfefficacy_7 + Selfefficacy_8
+   Selfeval =~ Selfeval_1 + selfeval_2 + selfeval_3 + Selfeval_4 + Selfeval_5 + Selfeval_6
+   GSL =~ GSL_1 + GSL_2 + GSL_3 + GSL_4 + GSL_5
+   
+   # Final_grade <~ test_grades + open_grades
+   
+# Struc
+# test_grades ~ Selfefficacy + Selfeval + GSL
+# open_grades ~ Selfefficacy + Selfeval + GSL
+# Final_grade ~ Selfefficacy + Selfeval + GSL + Class_1 + Class_2 + Class_3
+final_grade ~ Selfefficacy + Selfeval + GSL + Class_1 + Class_2 + Class_3
+
+# test_grades ~~ open_grades
+
+# final_grade ~ 1
+# test_grades ~ 1
+# open_grades ~ 1
+'
+
+?runMI
+out1 <- runMI(model_sem_mice, 
+              data=survey1_to_sem_missings %>% 
+                select(-Class, -Class_4, -username),
+              m = 10, 
+              miPackage="mice",
+              fun="sem",
+              meanstructure = TRUE,
+              ridge = T, estimator = "MLR")
+
+summary(out1, ci = T, stand = TRUE, rsq = TRUE)
+fitMeasures(out1, "chisq")
+
+```
+
+
+# ridges
+
+```{r}
+library(ggridges)
+
+survey1_to_sem_missings %>% 
+  # select(-starts_with("Class"), -username, -ends_with("grades"),- final_grade) %>% 
+  select(starts_with("Self") , starts_with("GSL")) %>%
+  tidyr::pivot_longer(everything(), names_to = "Question", values_to = "Likert") %>% 
+ggplot(aes(x = Likert, y = Question, height = stat(density))) + 
+  geom_density_ridges(stat = "binline", bins = 7, scale = 0.95, draw_baseline = FALSE)
+
+```
+
