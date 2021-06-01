@@ -347,7 +347,7 @@ df_comb$max_far %>% sd()
 #6
 set.seed(26)
 
-df_comb %>%
+compare = df_comb %>%
   column_to_rownames('id') %>% 
   select(-starts_with("mode")) %>%
   select(-freq) %>%
@@ -361,14 +361,24 @@ df_comb %>%
   ) %>%
   compare_solutions(statistics = c("AIC", "BIC", "AWE", "CLC","KIC"))
 
+compare$fits %>% 
+  select(Model ,Classes, AIC, BIC ,AWE ,CLC, KIC) %>%  write_csv(file = "LPA_fit.csv") #%>% 
+  # na.omit() %>% 
+
 # 'varying', 'equal'
 # 'equal', 'varying',
 # ?compare_solutions
 ```
 
+```{r}
+vroom::vroom("tidyLPA.txt")
+```
+
 
 
 ```{r}
+df_comb$max_n %>% summary()
+
  df_comb %>%
   column_to_rownames('id') %>% 
   select(-starts_with("mode")) %>%
@@ -411,6 +421,9 @@ gt::gt(profile_fit)
 ```{r}
 names(df_comb_lp)
 
+df_comb_lp %>% group_by(Class) %>% 
+  summarise(median(freq))
+
 df_comb_lp %>%
   select(-starts_with("mode"), -mc, -open) %>%
     mutate(Class = fct_recode(Class, "Disengaged learners" = "1", "Active learners" = "2", "Utilitarian learners"="3")) %>% 
@@ -435,23 +448,73 @@ df_comb_lp %>%
 df_comb_lp_plot %>% 
   pivot_longer(cols = c('Days in a row', "Unique days", "Early start", "Late finish", "Correct answers" ,"Mean time", "Minimum time", "Maximum time", "Frequency of mode", "Attempts"), names_to = "measures", values_to = "poms") ->df_comb_lp_plot
 
-
 df_comb_lp_plot %>% 
-  ggplot(aes(x = poms, y = measures, color = Class))+
-  geom_jitter(alpha = 0.3, width = 0.1, height = 0.3)+
+  ggplot(aes(y = poms, x = measures, color = Class))+
+  geom_jitter(position = position_jitter(seed = 2019, width = 0.3, height = 0.05), alpha = 0.3)+
+  geom_point(
+    data = data.frame(
+      measures = c("Correct answers", "Days in a row"),
+      poms = c(1 ,1),
+      Class = c("Disengaged learners" ,"Active learners")
+    ) ,
+    alpha = 0.3
+  )+
+  # geom_boxplot(alpha = 0.5, outlier.shape = NA, coef = 0, fill = 1)+
   geom_boxplot(alpha = 0.5, outlier.shape = NA, coef = 0)+
   theme_bw()+
   ggtitle("Latent Profiles of Engagement" )+
   # theme(legend.position = "none") +
-  theme(text=element_text(size=12,  family="Helvetica"))+
+  # theme(text=element_text(size=12,  family="Helvetica"))+
   scale_color_brewer(palette = "Set2")+
-  ylab("")+
-  coord_flip()+
-  scale_y_discrete(guide = guide_axis(n.dodge=2))+
-  theme(legend.position = c(0.9, 0.8))+
-  xlim(c(0, 1))
+  xlab("")+
+  # coord_flip()+
+  scale_x_discrete(guide = guide_axis(n.dodge=2))+
+  theme(legend.position = c(0.9, 0.8),
+      axis.title = element_text(size = 16),
+      axis.text.x = element_text(family = "Roboto Mono", size = 12),
+      axis.text.y = element_text(family = "Roboto Mono", size = 12),
+      legend.text = element_text(family = "Roboto Mono", size = 10, color = "grey42"),
+      legend.title = element_text(family = "Roboto Mono", size = 12, color = "grey52"),
+      panel.grid = element_blank(),
+      # legend.key = element_rect(color = NA, fill = NA),
+      legend.key = element_rect(colour = "transparent", fill = alpha("red", 0))
+)+
+  # theme(legend.position = "none")+
+  ylim(c(0, 1))+
+    annotate(
+    "text", x = 1.5, y = 0.85, family = "Poppins", size = 3, color = "gray20",
+    label = "4090 attemps"
+  )+
+  annotate(
+    "text", x = 5, y = 0.05, family = "Poppins", size = 3, color = "gray20",
+    label = "2 days before \n the exam"
+  )+
+  annotate(
+    "text", x = 6, y = 0.7, family = "Poppins", size = 3, color = "gray20",
+    label = "13% of attemps \n in gamified modes"
+  )+
+  geom_curve(
+    data = data.frame(
+      x1 = c(1.5, 5, 6),
+      y1 = c(0.87, 0.09 ,0.73),
+      x2 = c(0.9, 4.4 ,5.2),
+      y2 = c(0.97, 0.171, 0.867)
+    ),
+    aes(
+      x = x1,
+      y = y1,
+      xend = x2,
+      yend = y2
+    ),
+    arrow = arrow(length = unit(0.07, "inch")),
+    size = 0.4,
+    color = "gray20",
+    curvature = 0.4
+  )
+?annotate
 
-ggsave(filename = "LPA_GGPLOT2.png", width = 10, height = 5)
+
+ggsave(filename = "LPA_GGPLOT3.png", width = 10, height = 5)
 
 ?geom_jitter
 ```
@@ -1028,7 +1091,36 @@ g_grade = df_comb_lp %>%
 
 g_grade
 
-ggsave(filename = "grade_class.png", width = 8, height = 5)
+ggsave(filename = "grade_class_2.png", width = 8, height = 5)
+```
+
+```{r}
+my_comparisons <- list( c("Disengaged learners", "Active learners"), c("Active learners", "Non-users") )
+
+g_grade_2 = poor_model_scores %>% 
+  mutate(class = fct_recode(class, "Disengaged learners" = "1", "Active learners" = "2", "Utilitarian learners"="3" ,"Non-users" = "4")) %>% 
+  ggplot(aes(x = class, y = TM)) +
+  geom_violin( trim = T) +
+  geom_jitter(alpha = 0.3) +
+  stat_compare_means(comparisons = my_comparisons) + # Add pairwise comparisons p-value
+  stat_compare_means(label.y = -1)+#+     # Add global p-value+
+  # stat_pvalue_manual(test, label = "p.signif", tip.length = 0.01)
+    stat_summary(
+    fun.data = "mean_sdl",
+    fun.args = list(mult = 1),
+    geom = "pointrange",
+    color = "black"
+  ) +
+    theme(legend.position = "none") +
+  theme_bw() +
+  theme(text=element_text(size=16,  family="Helvetica"))+
+  scale_color_brewer(palette = "RdBu") +
+  ggtitle("Time Management by class")+
+  ylab("Time Management")
+
+g_grade_2
+
+ggsave(filename = "TM_class_2.png", width = 8, height = 5)
 ```
 
 
@@ -1038,6 +1130,9 @@ ggsave(filename = "grade_class.png", width = 8, height = 5)
 library(rstatix)
 # ??dunn_test
 df_comb_lp %>% dunn_test(sum ~ Class)
+
+poor_model_scores %>% dunn_test(final_grade ~ class)
+poor_model_scores %>% dunn_test(TM ~ class)
 ```
 
 ## Game mode 
@@ -1047,6 +1142,7 @@ df_comb_lp %>% dunn_test(sum ~ Class)
 ```{r}
 kruskal.test(freq ~ Class ,data = df_comb_lp)
 ```
+
 ```{r}
 df_comb_lp %>%
   ggplot(aes(x = Class , y = freq)) +
@@ -1367,6 +1463,8 @@ theme_set(theme_sjplot())
 plot_model(m3_lp, type = "pred", terms = c("Correct answers", "Attempts"))+
     theme_minimal()+
   theme(legend.position = c(0.8, 0.2))
+
+
 
 
 plot_model(m3, type = "pred", terms = c("Correct answers", "Attempts"))+
@@ -1936,7 +2034,20 @@ plot(lm_fa_2)
 ```{r}
 sjmisc::reliab_test(survey1_to_fa %>% select(starts_with("AMG")), scale.items = FALSE, digits = 3)
 
-psych::alpha(survey1_to_fa %>% select(starts_with("AMG")) )
+
+# - Selfeval_1 - TM_2
+C_A = tibble(factor = c( "Selfeval", "GSL", "CSL", "GSLCSL",
+                        "Selfefficacy", "TM", "APG" ,
+                        "CMG" ,"CPG" ,"AMG"), 
+             std.alpha = c(0.7040792 ,0.6081533, 0.5428689, 0.72145,
+                           0.8962932 ,0.7555768 ,0.8413274, 
+                           0.8577257 ,0.9018892, 0.8163391))
+
+# library(gtsummary)
+C_A %>% 
+  arrange(std.alpha)
+# psych::alpha(survey1_to_sem_missings %>% 
+#                    select(starts_with("CSL"), starts_with("GSL")))
 ```
 
 
@@ -1948,7 +2059,6 @@ GSL_Mean
 ```{r}
 names(survey1_to_fa) %>% as_tibble() %>% arrange(value)
 ```
-
 
 ```{r}
 # survey1_to_sem_missings %>%
@@ -1967,7 +2077,9 @@ M<-survey1_to_sem_missings %>%
          starts_with("CMG"),
          starts_with("CPG"),
          starts_with("CSL") ,
-         starts_with("GSL")) %>% na.omit() %>%
+         starts_with("GSL"), 
+         starts_with("AMG"),
+         final_grade) %>% na.omit() %>%
   cor()
 
 
@@ -1979,41 +2091,50 @@ p.mat <- cor.mtest(M, conf.level = .95, method = "spearman")
 # ?cor.mtest
 col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
 # pdf(file = "corplot.pdf")
+png(filename = "corrpot_final.png" ,width = 1000, height = 1000)
 corrplot(M, 
          # title = "Spearman correlation. Survey and application",
          method="color", col=col(200),  
          type="lower", 
          # order="hclust", 
          # addCoef.col = "black", # Add coefficient of correlation
-         tl.col="black", tl.srt=30, tl.offset = 0, #Text label color and rotation
+         tl.col="black", tl.srt=30, tl.offset = 0, tl.cex = 1.2/par("cex"), #Text label color and rotation
          # Combine with significance
          p.mat = p.mat, sig.level = 0.05, insig = "blank", 
          # hide correlation coefficient on the principal diagonal
          diag=T 
          )
-# dev.off()
+dev.off()
+```
+
+```{r}
+
 ```
 
 
 ```{r}
 
+
+
 mfin.model <- 'AMG =~ AMG_1 + AMG_2 + AMG_3 + AMG_4
    APG =~ APG_1 + APG_2 + APG_3 + APG_4
    CMG =~ CMG_1+ CMG_2 + CMG_3 + CMG_4 + CMG_5 + CMG_6 + CMG_7 + CMG_8
    CPG =~ CPG_1 + CPG_2 + CPG_3 + CPG_4 + CPG_5 + CPG_6 + CPG_7 + CPG_8
-   CSL =~ CSL_1 + CSL_2 + CSL_3
+   # CSL =~ CSL_1 + CSL_2 + CSL_3
    GSL =~ GSL_1 + GSL_2 + GSL_3 + GSL_4 + GSL_5
+   # CSLGSL =~ CSL_1 + CSL_2 + CSL_3 + GSL_1 + GSL_2 + GSL_3 + GSL_4 + GSL_5
    Selfefficacy =~ Selfefficacy_0 + Selfefficacy_2 + Selfefficacy_3 + Selfefficacy_4 + Selfefficacy_5 + Selfefficacy_6 + Selfefficacy_7 + Selfefficacy_8
-   Selfeval =~ Selfeval_1 + selfeval_2 + selfeval_3 + Selfeval_4 + Selfeval_5 + Selfeval_6
-   TM =~ TM_1 + TM_2 + TM_3 + TM_4 + TM_5 + TM_6 + TM_7_reversed + TM_8_reversed'
-
-mfin.model <- 'Selfefficacy =~ Selfefficacy_0 + Selfefficacy_2 + Selfefficacy_3 + Selfefficacy_4 + Selfefficacy_5 + Selfefficacy_6 + Selfefficacy_7 + Selfefficacy_8
-   Selfeval =~ Selfeval_1 + selfeval_2 + selfeval_3 + Selfeval_4 + Selfeval_5 + Selfeval_6 + GSL_1 + GSL_2  + GSL_4
-   # GSL =~ GSL_1 + GSL_2 + GSL_3 + GSL_4 + GSL_5
+   # Selfeval =~ selfeval_2 + selfeval_3 + Selfeval_4 + Selfeval_5 + Selfeval_6
    TM =~ TM_1 + TM_3 + TM_4 + TM_5 + TM_6 + TM_7_reversed + TM_8_reversed
 '
 
-fit <- lavaan::cfa(mfin.model, data = survey1_to_sem_missings, 
+# mfin.model <- 'Selfefficacy =~ Selfefficacy_0 + Selfefficacy_2 + Selfefficacy_3 + Selfefficacy_4 + Selfefficacy_5 + Selfefficacy_6 + Selfefficacy_7 + Selfefficacy_8
+#    Selfeval =~ Selfeval_1 + selfeval_2 + selfeval_3 + Selfeval_4 + Selfeval_5 + Selfeval_6
+#    # GSL =~ GSL_1 + GSL_2 + GSL_3 + GSL_4 + GSL_5
+#    TM =~ TM_1 + TM_3 + TM_4 + TM_5 + TM_6 + TM_7_reversed + TM_8_reversed
+# '
+
+fit <- lavaan::cfa(mfin.model, data = survey1_to_sem_missings , 
                    estimator = "MLR", missing = "fiml")
 
 # library(semPlot)
@@ -2022,15 +2143,57 @@ semPaths(fit, "par", weighted = FALSE, nCharNodes = 7, shapeMan = "rectangle",
 
 lavInspect(fit, "cor.lv")
 
-?semPaths
+# summary(fit)
+
+# ?semPaths
 lavaan::summary(fit, fit.measures = TRUE)
 
 standardizedSolution(fit)
+
+poor_model_scores <- lavPredict(fit) %>% 
+  as_tibble() %>% 
+  mutate_all(as.numeric) %>% 
+  mutate(username = survey1_to_sem_missings$username, 
+         class = survey1_to_sem_missings$Class, 
+         final_grade = survey1_to_sem_missings$final_grade)
+
+poor_model_scores %>% 
+  left_join(survey1_to_sem %>% 
+              select(starts_with("CPG"), username) %>% 
+              mutate(username = username %>% as.numeric())) %>% 
+  na.omit() %>% 
+  group_by(username) %>% 
+  mutate(CPG_mean = sum(CPG_1 ,CPG_2 ,CPG_3 ,CPG_4 ,CPG_5 ,CPG_6 ,CPG_7))
+  select(-username) %>% 
+  tbl_summary(by = class) %>% 
+  add_n() %>% 
+  add_p() %>% 
+  modify_header(label = "**Factor**") %>% # update the column header
+  bold_labels() %>% 
+  # add_stat_label(location = NULL, label = NULL)
+#%>% 
+  #   as_gt() %>%
+  # gt::gtsave(filename = "anova_factor.html")
+    as_flex_table() %>%
+  flextable::save_as_docx(path = "ANOVA_FOR_FACTORS.docx")
+
+
+poor_model_scores %>% 
+  select(-username) %>%
+  tbl_summary(
+    by = class,
+    statistic = list(all_continuous() ~ "{median} ({sd})",
+                     all_categorical() ~ "{n} / {N} ({p}%)"),
+    digits = all_continuous() ~ 2,
+    # label = grade ~ "Tumor Grade",
+    missing_text = "(Missing)"
+  )
 ```
 
 
 
-  Comparative Fit Index (CFI)                    0.976+
+    modify_header(label = "**Variable**") %>% # update the column header
+  bold_labels() Comparative Fit Index (CFI)                    0.976+
   Tucker-Lewis Index (TLI)                       0.928+
   RMSEA                                          0.128-
   SRMR                                           0.031+
@@ -2130,8 +2293,8 @@ MVN::mvn(data = survey1_to_sem_imputed %>% select(-username, -starts_with("Class
 mfin.model_sem <- '
 # Measurement model
 Selfefficacy =~ Selfefficacy_0 + Selfefficacy_2 + Selfefficacy_3 + Selfefficacy_4 + Selfefficacy_5 + Selfefficacy_6 + Selfefficacy_7 + Selfefficacy_8
-   Selfeval =~  selfeval_2 + selfeval_3 + Selfeval_4 + Selfeval_5 + Selfeval_6 
-   TM =~ TM_1 + TM_3 + TM_4 + TM_5 + TM_6 + TM_7_reversed + TM_8_reversed
+   Selfeval =~  selfeval_2 + selfeval_3 + Selfeval_4  + Selfeval_5 + Selfeval_6 
+   TM =~ TM_1 +  TM_3 + TM_4 + TM_5 + TM_6 + TM_7_reversed + TM_8_reversed
    
    # Final_grade <~ test_grades + open_grades
    
@@ -2139,7 +2302,6 @@ Selfefficacy =~ Selfefficacy_0 + Selfefficacy_2 + Selfefficacy_3 + Selfefficacy_
 # Regressions
 
 final_grade ~ Selfefficacy * TM + Class_1 + Class_2 + Class_3 + TM + Selfefficacy + Selfeval
-
 
 final_grade ~ 1
 '
@@ -2167,7 +2329,7 @@ semPaths(fit_sem, what = "col", whatLabels = "par", style = "mx",
 ```
 
 ```{r}
-?fitMeasures
+# ?fitMeasures
 fitMeasures(fit_sem, 
             fit.measures = c("chisq", "df", "pvalue", "cfi", "rmsea", "tli", "SRMR"), 
             output = "text")
@@ -2437,11 +2599,12 @@ lm_fscores %>%
 m5 = lm(final_grade ~ 
           Class*Selfefficacy +
           Class*TM +
-          Class*Selfeval +
+          Selfeval+
+          # Class*Selfeval +
           Class 
         ,data = lm_fscores %>% 
     dplyr::select(Class, Selfefficacy, TM ,Selfeval ,username, final_grade) %>%
-          filter(!username %in% c(73834, 453095 ,485167, 479665)) %>%
+          filter(!username %in% c(73834, 453095 ,485167, 479665, 460484, 478886, 459028)) %>%
           column_to_rownames("username"))
 
 summary(m5)
@@ -2475,20 +2638,33 @@ plot_model(m5, type = "pred", terms = c("Selfefficacy" ,"TM", "Class"))+
 
 plot_model(m5, type = "pred", terms = c("Selfefficacy" ,"Class"))+
     theme_minimal()+
-  # theme(legend.position = c(0.8, 0.2))+
-  theme(text=element_text(size=12,  family="Helvetica"))
+  theme(legend.position = c(0.8, 0.2))+
+  theme(text=element_text(size=12,  family="Helvetica"))+
+  xlab("Self-efficacy")+
+  scale_colour_brewer(palette = "Set1")+
+    scale_colour_hue(name = "Class",
+    # breaks=c("mb", "ma", "mc"),
+    labels=c("Non users", "Disengaged", "Active" ,"Utilitarian"))
 
 
 plot_model(m5, type = "pred", terms = c("TM", "Class"))+
     theme_minimal()+
-  # theme(legend.position = c(0.8, 0.2))+
-  theme(text=element_text(size=12,  family="Helvetica"))
+  theme(legend.position = c(0.8, 0.2))+
+  theme(text=element_text(size=12,  family="Helvetica"))+
+  xlab("Time-management")+
+  scale_colour_brewer(palette = "Set1")+
+    scale_colour_hue(name = "Class",
+    # breaks=c("mb", "ma", "mc"),
+    labels=c("Non users", "Disengaged", "Active" ,"Utilitarian"))
+
+
 
 
 plot_model(m5, type = "pred", terms = c("Selfeval"))+
     theme_minimal()+
   # theme(legend.position = c(0.8, 0.2))+
-  theme(text=element_text(size=12,  family="Helvetica"))
+  theme(text=element_text(size=12,  family="Helvetica"))+
+  xlab("Self-evaluation")
 ```
 
 ## robust
@@ -2773,5 +2949,63 @@ survey1_to_sem_missings %>%
 ggplot(aes(x = Likert, y = Question, height = stat(density))) + 
   geom_density_ridges(stat = "binline", bins = 7, scale = 0.95, draw_baseline = FALSE)
 
+```
+
+Model 1 : In this model we use application data as predictors and exam grade as an outcome, so that we could understand which components of profiles are the strongest predictors for the final grade. Latent Profiles included as a control variable with Disengaged students as reference level, however even with control for attempts and frequency of correct answers, engagement profile remains significant, i.e. disengaged students on average scored 10 point less at the exam, compared to active and utilitarian. While more time that students spend in the mobile application negatively correlates with final grade, we believe that that effect was introduced by interaction effect. Thus, students with a small number of attempts achieve roughly similar grades, no matter what proportion of these attempts were correct. The best interpretation here will be the least interesting, but if a student answered less than lets say 50 questions, we simply could not be sure that the frequency of correct answers connected with students knowledge and not just a noise, luck or random clicking. Further, students with less than a 75% of correct answers do score less more attempts they made, but after 80% correct attempts additional attempts positively connected with final grade. See figure sjplot_1. That is a strong indicator of ambiguous influence of application on a studying process. In this way, students who know the subject well enough (75-80%) will master the knowledge through repetition in the app, but students who did not know the subject could not get the knowledge necessary for the exam through the application.
+
+
+Model 2: app users AND answered in the survey, making more attempts slightly reduce final grade, but that is only true for students with small amounts of attempts. Also, there is an interactive effect between the number of attempts and frequency of correct answers, so students who make many mistakes do not benefit from prolonged use of the application, while students who correctly answer questions more frequently highly benefit from using the application for a long time. Self Efficacy strongly positively influences student performance. In addition, the more time students spend in test and practice modes, the higher grade they receive, compared to gamified modes.
+game modes negatively influence student performance and that supported by user study, since test and practice were evaluated higher than battle and compete (LINK to usability study)
+
+Model 3 : The final model includes students who agreed to participate in study, if missing values appeared in single or two columns, they were imputed with mice Buuren  & Groothuis-Oudshoorn (2010) following Buuren (2018), observations with more missing were removed.  Application engagement data was reduced to a single variable of a Class, therefore all students who did not use an application naturally formed Class 4 that technically will have zeros in all application metrics. It was used as a reference level in the model. All students who used the app score significantly higher grades than students who choose not use it at all.
+
+
+
+### final data info
+
+```{r}
+super_final = lm_fscores %>% 
+    dplyr::select(Class, Selfefficacy, TM ,Selfeval ,username, final_grade) %>%
+          filter(!username %in% c(73834, 453095 ,485167, 479665, 460484, 478886, 459028)) %>% 
+  na.omit()
+
+super_final %>% 
+  na.omit() %>% 
+  left_join(survey1 %>% 
+              mutate(username = username %>% as.numeric())) %>% 
+  # .$gender %>% table()
+  filter(Class ==4)
+```
+
+```{r}
+scale_this <- function(x){
+  (x - mean(x, na.rm=TRUE)) / sd(x, na.rm=TRUE)
+}
+
+poor_model_scores %>% 
+  left_join(survey1_to_sem %>% 
+              select(starts_with("CPG"), starts_with("GSL"), username) %>% 
+              mutate(username = username %>% as.numeric())) %>% 
+  filter(username %in% super_final$username) %>% 
+  group_by(username) %>% 
+  mutate(CPG_scaled = sum(CPG_1 ,CPG_2 ,CPG_3 ,CPG_4 ,CPG_5 ,CPG_6 ,CPG_7, CPG_8),
+         GSL_scaled = sum(GSL_1, GSL_2, GSL_3, GSL_4, GSL_5)) %>% 
+  ungroup() %>% 
+  mutate(CPG_scaled = scale_this(CPG_scaled),
+         GSL_scaled = scale_this(GSL_scaled)) %>% 
+  select(-username, 
+         -CPG_1 ,-CPG_2 ,-CPG_3 ,-CPG_4 ,-CPG_5 ,-CPG_6 ,-CPG_7 ,-CPG_8,
+         -GSL_1, -GSL_2, -GSL_3, -GSL_4, -GSL_5) %>%
+  tbl_summary(by = class) %>% 
+  add_n() %>% 
+  add_p() %>% 
+  modify_header(label = "**Factor**") %>% # update the column header
+  bold_labels() %>% 
+  # add_stat_label(location = NULL, label = NULL)
+#%>% 
+  #   as_gt() %>%
+  # gt::gtsave(filename = "anova_factor.html")
+    as_flex_table() %>%
+  flextable::save_as_docx(path = "ANOVA_FOR_FACTORS_new.docx")
 ```
 
